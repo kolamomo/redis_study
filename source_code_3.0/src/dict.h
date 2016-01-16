@@ -44,15 +44,16 @@
 /* Unused arguments generate annoying warnings... */
 #define DICT_NOTUSED(V) ((void) V)
 
+//声明hash表节点
 typedef struct dictEntry {
-    void *key;
-    union {
+    void *key;   //键
+    union {   //值
         void *val;
         uint64_t u64;
         int64_t s64;
         double d;
     } v;
-    struct dictEntry *next;
+    struct dictEntry *next;  //指向同一hash值的下一个节点的指针
 } dictEntry;
 
 typedef struct dictType {
@@ -66,18 +67,22 @@ typedef struct dictType {
 
 /* This is our hash table structure. Every dictionary has two of this as we
  * implement incremental rehashing, for the old to the new table. */
+//声明hash表
 typedef struct dictht {
-    dictEntry **table;
-    unsigned long size;
-    unsigned long sizemask;
-    unsigned long used;
+    dictEntry **table;   //hash表数组
+    unsigned long size;  //hash表大小
+    unsigned long sizemask;  //hash表掩码，用于计算索引值
+    unsigned long used;  //hash表已有节点数量
 } dictht;
 
+//声明字典
 typedef struct dict {
-    dictType *type;
-    void *privdata;
-    dictht ht[2];
+    dictType *type;  //根据字典的不同用途，对应特定的函数（dictType定义了一组函数指针）
+    void *privdata;  //私有数据
+    dictht ht[2];    //hash表，字典里包含两个hash表，一个存储数据，一个用于扩容rehash
+    //rehash索引，当rehash结束时，rehashidx设为-1
     long rehashidx; /* rehashing not in progress if rehashidx == -1 */
+    //正在运行的安全迭代起个数
     int iterators; /* number of iterators currently running */
 } dict;
 
@@ -85,10 +90,15 @@ typedef struct dict {
  * dictAdd, dictFind, and other functions against the dictionary even while
  * iterating. Otherwise it is a non safe iterator, and only dictNext()
  * should be called while iterating. */
+//hash表迭代器
 typedef struct dictIterator {
-    dict *d;
-    long index;
+    dict *d;  //被迭代的字典
+    long index;  //迭代器指向的hash表的索引位置
+    //table: 迭代字典中哪一个hash表，值为0或1
+    //safe: 标识迭代器是否安全
     int table, safe;
+    //entry: 当前指向的节点
+    //nextEntry: 当前指向节点的下一个节点，在迭代时，entry所指向的节点可能会被修改，所以这里需要一个指针保存下一个节点的指针
     dictEntry *entry, *nextEntry;
     /* unsafe iterator fingerprint for misuse detection. */
     long long fingerprint;

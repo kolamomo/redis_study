@@ -51,7 +51,8 @@
 sds sdsnewlen(const void *init, size_t initlen) {
     struct sdshdr *sh;
 
-    if (init) {
+    //注意申请空间的长度需要+1，这是因为在字节流数组buf末尾需要加一个结束符字节‘\0’
+    if (init) { //根据是否需要初始化决定调用malloc还是calloc申请空间
         sh = zmalloc(sizeof(struct sdshdr)+initlen+1);
     } else {
         sh = zcalloc(sizeof(struct sdshdr)+initlen+1);
@@ -269,6 +270,7 @@ sds sdscatsds(sds s, const sds t) {
 /* Destructively modify the sds string 's' to hold the specified binary
  * safe string pointed by 't' of length 'len' bytes. */
 sds sdscpylen(sds s, const char *t, size_t len) {
+    //这里通过buf的指针减去sdshdr长度得到sdshdr结构体的指针
     struct sdshdr *sh = (void*) (s-(sizeof(struct sdshdr)));
     size_t totlen = sh->free+sh->len;
 
