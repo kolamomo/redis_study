@@ -50,6 +50,7 @@ typedef char *sds;
 ```
 
 sds初始化时会创建一个刚好可以存放所需字节流大小的空间。
+
 ```
 //sds.c
 sds sdsnew(const char *init) {
@@ -148,7 +149,45 @@ typedef struct dictIterator {
     //entry: 当前指向的节点
     //nextEntry: 当前指向节点的下一个节点，在迭代时，entry所指向的节点可能会被修改，所以这里需要一个指针保存下一个节点的指针
     dictEntry *entry, *nextEntry;
-    /* unsafe iterator fingerprint for misuse detection. */
     long long fingerprint;
 } dictIterator;
 ```
+
+### 跳跃表
+
+```
+//redis.h
+
+//跳跃表节点
+typedef struct zskiplistNode {
+    robj *obj;    //成员对象
+    double score;  //分值
+    struct zskiplistNode *backward; //后退指针
+    struct zskiplistLevel {
+        struct zskiplistNode *forward;  //前进指针
+        unsigned int span;    //跨度
+    } level[];
+} zskiplistNode;
+
+//跳跃表
+typedef struct zskiplist {
+    struct zskiplistNode *header, *tail; //头节点，尾节点指针
+    unsigned long length;  //长度
+    int level;    //层数
+} zskiplist;
+```
+
+### 整数集合
+
+```
+//intset.h
+
+typedef struct intset {
+    uint32_t encoding;
+    uint32_t length;
+    int8_t contents[];
+} intset;
+```
+
+
+### 压缩列表
