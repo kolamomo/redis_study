@@ -242,8 +242,10 @@ int dictExpand(dict *d, unsigned long size)
  * guaranteed that this function will rehash even a single bucket, since it
  * will visit at max N*10 empty buckets in total, otherwise the amount of
  * work it does would be unbound and the function may block for a long time. */
+//进行rehash操作
 int dictRehash(dict *d, int n) {
     int empty_visits = n*10; /* Max number of empty buckets to visit. */
+    //判断rehash是否正在进行中
     if (!dictIsRehashing(d)) return 0;
 
     while(n-- && d->ht[0].used != 0) {
@@ -252,12 +254,14 @@ int dictRehash(dict *d, int n) {
         /* Note that rehashidx can't overflow as we are sure there are more
          * elements because ht[0].used != 0 */
         assert(d->ht[0].size > (unsigned long)d->rehashidx);
+        //找到当前需要进行rehash的桶位置，略过数据为空的桶
         while(d->ht[0].table[d->rehashidx] == NULL) {
             d->rehashidx++;
             if (--empty_visits == 0) return 1;
         }
         de = d->ht[0].table[d->rehashidx];
         /* Move all the keys in this bucket from the old to the new hash HT */
+        //遍历hash表ht[0]当前桶中的每一个元素，将其放入放入hash表ht[1]中
         while(de) {
             unsigned int h;
 
@@ -270,15 +274,20 @@ int dictRehash(dict *d, int n) {
             d->ht[1].used++;
             de = nextde;
         }
+        //将hash表ht[0]当前桶的元素清空
         d->ht[0].table[d->rehashidx] = NULL;
+        //将rehash的桶索引加1
         d->rehashidx++;
     }
 
     /* Check if we already rehashed the whole table... */
+    //检查是否完成了全部的rehash操作
     if (d->ht[0].used == 0) {
+        //清空hash表ht[0],将hash表ht[1]设为ht[0],并重置hash表ht[1]
         zfree(d->ht[0].table);
         d->ht[0] = d->ht[1];
         _dictReset(&d->ht[1]);
+        //将rehash索引设为-1，表示rehash操作全部完成
         d->rehashidx = -1;
         return 0;
     }
@@ -319,6 +328,7 @@ static void _dictRehashStep(dict *d) {
 }
 
 /* Add an element to the target hash table */
+//将数据插入到hash表中
 int dictAdd(dict *d, void *key, void *val)
 {
     dictEntry *entry = dictAddRaw(d,key);
@@ -343,12 +353,16 @@ int dictAdd(dict *d, void *key, void *val)
  * If key already exists NULL is returned.
  * If key was added, the hash entry is returned to be manipulated by the caller.
  */
+//将数据插入到hash表中
+//如果key已存在，返回NULL
+//如果key不存在，则创建新的hash表节点，并插入到hash表中
 dictEntry *dictAddRaw(dict *d, void *key)
 {
     int index;
     dictEntry *entry;
     dictht *ht;
 
+    //判断字典是否正在进行rehash，如果正在进行
     if (dictIsRehashing(d)) _dictRehashStep(d);
 
     /* Get the index of the new element, or -1 if
