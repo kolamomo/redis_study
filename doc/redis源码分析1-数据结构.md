@@ -6,7 +6,7 @@
 typedef struct redisObject {
     unsigned type:4;      //类型
     unsigned encoding:4;  //编码
-    unsigned lru:REDIS_LRU_BITS; 
+    unsigned lru:REDIS_LRU_BITS;
     int refcount;
     void *ptr;            //指向底层数据结构的指针
 } robj;
@@ -74,7 +74,6 @@ sds sdsnewlen(const void *init, size_t initlen) {
     sh->buf[initlen] = '\0';
     return (char*)sh->buf;
 }
-
 ```
 
 ### 双向链表list
@@ -153,11 +152,171 @@ typedef struct dictIterator {
 } dictIterator;
 ```
 
+#### 插入数据
+```
+//将数据插入到hash表中
+int dictAdd(dict *d, void *key, void *val)
+{
+    dictEntry *entry = dictAddRaw(d,key); //将key插入到hash表中
+
+    if (!entry) return DICT_ERR;
+    dictSetVal(d, entry, val); //设置value
+    return DICT_OK;
+}
+```
+
+```
+//将数据插入到hash表中
+//如果key已存在，返回NULL
+//如果key不存在，则创建新的hash表节点，并插入到hash表中
+dictEntry *dictAddRaw(dict *d, void *key)
+{
+    int index;
+    dictEntry *entry;
+    dictht *ht;
+
+    //判断字典是否正在进行rehash，如果正在进行，则进行一次单步的rehash
+    if (dictIsRehashing(d)) _dictRehashStep(d);
+
+    //计算key在hash表中的索引，根据需要进行hash表的扩容
+    if ((index = _dictKeyIndex(d, key)) == -1)
+        return NULL;
+
+    //判断hash表是否正在rehash的过程中，只要hash表在rehash的过程中，就将数据插入到ht[1]中
+    ht = dictIsRehashing(d) ? &d->ht[1] : &d->ht[0];
+    //为元素分配空间
+    entry = zmalloc(sizeof(*entry));
+    //将结点插入hash表对应桶的表头
+    entry->next = ht->table[index];
+    ht->table[index] = entry;
+    //hash表已存储元素数加1
+    ht->used++;
+
+    //设置新节点的键
+    dictSetKey(d, entry, key);
+    //返回新插入节点的指针
+    return entry;
+}
+```
+
+```
+static int _dictKeyIndex(dict *d, const void *key)
+{
+    unsigned int h, idx, table;
+    dictEntry *he;
+
+    if (_dictExpandIfNeeded(d) == DICT_ERR)
+        return -1;
+    h = dictHashKey(d, key);
+    //这里要分别查询两个hash表，检查key是否已经存在
+    for (table = 0; table <= 1; table++) {
+        idx = h & d->ht[table].sizemask;
+        he = d->ht[table].table[idx];
+        while(he) {
+            //如果key已存在，则返回-1
+            if (dictCompareKeys(d, key, he->key))
+                return -1;
+            he = he->next;
+        }
+        //如果hash表没有处于rehash的过程中，说明ht[1]没有被使用，则不需要再查询ht[1]
+        if (!dictIsRehashing(d)) break;
+    }
+    return idx;
+}
+```
+
+#### 删除元素
+
+```
+int dictDelete(dict *ht, const void *key) {
+    return dictGenericDelete(ht,key,0);
+}
+```
+
+```
+//查找并删除节点
+static int dictGenericDelete(dict *d, const void *key, int nofree)
+{
+    unsigned int h, idx;
+    dictEntry *he, *prevHe;
+    int table;
+
+    if (d->ht[0].size == 0) return DICT_ERR;
+    //如果hash表正处于rehash的过程中，则进行一次单步的rehash操作
+    if (dictIsRehashing(d)) _dictRehashStep(d);
+    h = dictHashKey(d, key);  //计算节点的hash_key
+
+    //分别在两个hash表中进行查找
+    for (table = 0; table <= 1; table++) {
+        //确定节点在hash表中对应的桶位置
+        idx = h & d->ht[table].sizemask;
+        he = d->ht[table].table[idx];
+        prevHe = NULL;
+        //遍历所在桶的链表进行查找
+        while(he) {
+            //找到了key对应的结点
+            if (dictCompareKeys(d, key, he->key)) {
+                //从链表中删除节点
+                if (prevHe)
+                    prevHe->next = he->next;  //删除非表头结点
+                else
+                    d->ht[table].table[idx] = he->next;  //删除表头结点
+                //如果nofree为0，则还需要调用节点的相关函数进行清理操作
+                if (!nofree) {
+                    dictFreeKey(d, he);
+                    dictFreeVal(d, he);
+                }
+                zfree(he);
+                //hash表存储计数减1
+                d->ht[table].used--;
+                return DICT_OK;
+            }
+            prevHe = he;
+            he = he->next;
+        }
+        //如果没有处于rehash的过程中，说明ht[1]没有使用，则不再查找ht[1]
+        if (!dictIsRehashing(d)) break;
+    }
+    return DICT_ERR; /* not found */
+}
+```
+
+#### 查找元素
+
+```
+//在hash表中根据key值查找结点
+dictEntry *dictFind(dict *d, const void *key)
+{
+    dictEntry *he;
+    unsigned int h, idx, table;
+
+    if (d->ht[0].size == 0) return NULL; /* We don't have a table at all */
+    if (dictIsRehashing(d)) _dictRehashStep(d);
+    h = dictHashKey(d, key);  
+    for (table = 0; table <= 1; table++) {
+        idx = h & d->ht[table].sizemask;
+        he = d->ht[table].table[idx];
+        while(he) {
+            if (dictCompareKeys(d, key, he->key))
+                return he;
+            he = he->next;
+        }
+        if (!dictIsRehashing(d)) return NULL;
+    }
+    return NULL;
+}
+```
+
 #### rehash
+
+hash表的rehash操作分为两步：  
+1. 扩容  
+2. rehash
+
 ```
 //进行rehash操作
 int dictRehash(dict *d, int n) {
-    int empty_visits = n*10; 
+    int empty_visits = n*10;
     //判断rehash是否正在进行中
     if (!dictIsRehashing(d)) return 0;
 
@@ -205,8 +364,64 @@ int dictRehash(dict *d, int n) {
 }
 ```
 
+```
+//根据需要决定是否扩展hash表
+static int _dictExpandIfNeeded(dict *d)
+{
+    //如果正在rehash的过程中，则直接返回
+    if (dictIsRehashing(d)) return DICT_OK;
+
+    //如果hash表ht[0]大小为空，则初始化hash表ht[0]
+    if (d->ht[0].size == 0) return dictExpand(d, DICT_HT_INITIAL_SIZE);
+
+    //判断hash表扩展的条件
+    //当dict_can_resize设置为1时，hash表中已存储元素数与hash表大小之比为1时需要进行扩展
+    //当dict_can_resize设置为0时，hash表中已存储元素数与hash表大小之比为5时需要进行扩展
+    if (d->ht[0].used >= d->ht[0].size &&
+        (dict_can_resize ||
+         d->ht[0].used/d->ht[0].size > dict_force_resize_ratio))
+    {
+        //进行hash表的扩容，扩容的大小为当前hash表大小的两倍
+        return dictExpand(d, d->ht[0].used*2);
+    }
+    return DICT_OK;
+}
+```
+
+```
+//将hash表的大小扩展为传入参数size的大小
+int dictExpand(dict *d, unsigned long size)
+{
+    dictht n;
+    unsigned long realsize = _dictNextPower(size);
+
+    if (dictIsRehashing(d) || d->ht[0].used > size)
+        return DICT_ERR;
+
+    if (realsize == d->ht[0].size) return DICT_ERR;
+
+    n.size = realsize;
+    n.sizemask = realsize-1;
+    n.table = zcalloc(realsize*sizeof(dictEntry*));
+    n.used = 0;
+
+    //如果主hash表没有初始化，则初始化主hash表，然后直接返回
+    if (d->ht[0].table == NULL) {
+        d->ht[0] = n;
+        return DICT_OK;
+    }
+
+    //如果主hash表非空，则设置hash表ht[1]的空间，并将rehash索引初始化为0
+    d->ht[1] = n;
+    d->rehashidx = 0;
+    return DICT_OK;
+}
+```
+
 ### 跳跃表
 
+跳表是链表的一种，它在链表的基础上增加了跳跃功能，使得在查找元素时，跳表能够提供O(log n)的时间复杂度。
+节点定义见redis.h 实现见t_zset.c
 ```
 //redis.h
 
@@ -289,7 +504,7 @@ static intset *intsetUpgradeAndAdd(intset *is, int64_t value) {
     uint8_t newenc = _intsetValueEncoding(value);
     int length = intrev32ifbe(is->length);
     //由value导致的升级，说明value要么比原集合中所有数都大，要么都小
-    int prepend = value < 0 ? 1 : 0; 
+    int prepend = value < 0 ? 1 : 0;
 
     is->encoding = intrev32ifbe(newenc);
     is = intsetResize(is,intrev32ifbe(is->length)+1);
@@ -473,3 +688,336 @@ uint32_t intrev32(uint32_t v) {
 }
 ```
 ### 压缩列表
+
+ziplist是用一个字节数组来实现的双向链表结构，主要是节省了链表指针的存储，但是每次向链表增加元素都需要重新分配内存。
+
+```
+typedef struct zlentry {
+    // prevrawlen：上一个节点的长度
+    // prevrawlensize：编码 prevrawlen 所需的字节大小    
+    unsigned int prevrawlensize, prevrawlen;
+    // len ：当前节点的长度
+    // lensize ：编码 len 所需的字节大小
+    unsigned int lensize, len;
+    // 当前节点 header 的大小, 等于 prevrawlensize + lensize
+    unsigned int headersize;
+    // 当前节点值所使用的编码类型
+    unsigned char encoding;
+    //指向当前节点的指针
+    unsigned char *p;
+} zlentry;
+```
+
+```
+// 定位到 ziplist 的 bytes 属性，该属性记录了整个 ziplist 所占用的内存字节数
+// 用于取出 bytes 属性的现有值，或者为 bytes 属性赋予新值
+#define ZIPLIST_BYTES(zl)       (*((uint32_t*)(zl)))
+// 定位到 ziplist 的 offset 属性，该属性记录了到达表尾节点的偏移量
+// 用于取出 offset 属性的现有值，或者为 offset 属性赋予新值
+#define ZIPLIST_TAIL_OFFSET(zl) (*((uint32_t*)((zl)+sizeof(uint32_t))))
+// 定位到 ziplist 的 length 属性，该属性记录了 ziplist 包含的节点数量
+// 用于取出 length 属性的现有值，或者为 length 属性赋予新值
+#define ZIPLIST_LENGTH(zl)      (*((uint16_t*)((zl)+sizeof(uint32_t)*2)))
+// 返回 ziplist 表头的大小
+#define ZIPLIST_HEADER_SIZE     (sizeof(uint32_t)*2+sizeof(uint16_t))
+// 返回指向 ziplist 第一个节点（的起始位置）的指针
+#define ZIPLIST_ENTRY_HEAD(zl)  ((zl)+ZIPLIST_HEADER_SIZE)
+// 返回指向 ziplist 最后一个节点（的起始位置）的指针
+#define ZIPLIST_ENTRY_TAIL(zl)  ((zl)+intrev32ifbe(ZIPLIST_TAIL_OFFSET(zl)))
+// 返回指向 ziplist 末端 ZIP_END （的起始位置）的指针
+#define ZIPLIST_ENTRY_END(zl)   ((zl)+intrev32ifbe(ZIPLIST_BYTES(zl))-1)
+```
+
+**压缩列表的存储结构**
+
+< zlbytes>< zltail>< zllen>< entry>< entry>< zlend>
+
+Zlbytes：一个4字节的无符号整型，存储的是整个ziplist占用的字节数，用于重分配内存时使用。
+Zltail：一个4字节的无符号整型，存储的是链表最后一个结点的偏移值，即链表开头地址+zltail即为最后一个结点的起始地址
+Zllen：一个2字节的无符号整型，存储的是链表中存储的结点数，当这个值存储的是2字节无符号整型的最大值时，需要遍历链表获取链表的结点数
+Entry：链表结点，链表结点的存储格式见结点存储结构
+Zlend：占用1字节的链表的结尾符，值为255
+
+**节点存储结构**
+
+<上一个链表结点占用的长度><当前链表结点元素占用的长度><当前结点数据>
+
+1 上一个链表结点占用的长度  
+当长度数据小于254使用一个字节存储，该字节存储的数值就是该长度，  
+当长度数据大于等于254时，使用5个字节存储，第一个字节的数值为254，表示接下来的4个字节才真正表示长度  
+
+2 当前链表结点元素占用的长度
+与上一个链表结点占用的长度不同，当前链表节点元素占用的长度除了记录长度外，还要记录当前结点数据的编码类型
+第一个字节的前两位用于区分长度存储编码类型和数据编码类型，具体如下
+
+* 字符串类型编码  
+|00pppppp|  
+长度小于等于63（2^6-1）字节的字符串，后6位用于存储字符串长度，长度与类型总共占用了1个字节  
+|01pppppp|qqqqqqqq|  
+长度小于等于16383（2^14-1）字节的字符串，后14位用于存储字符串长度，长度与类型总共占用了2个字节  
+|10______|qqqqqqqq|rrrrrrrr|ssssssss|tttttttt|   
+长度大于等于16384字节的字符串，后4个字节用于存储字符串长度，长度与类型总共占用了5个字节  
+
+* 整型编码  
+|1100____|   
+整型类型，后2个字节存储的值就是该整数  
+|1101____|   
+整型类型，后4个字节存储的值就是该整数  
+|1110____|   
+整型类型，后8个字节存储的值就是该整数  
+
+#### 创建压缩列表
+```
+//创建一个空的压缩列表
+unsigned char *ziplistNew(void) {
+    //ZIPLIST_HEADER_SIZE 是 ziplist 表头的大小, 1 字节是表末端 ZIP_END 的大小
+    unsigned int bytes = ZIPLIST_HEADER_SIZE+1;
+    // 为空表（表头和表末端）分配空间
+    unsigned char *zl = zmalloc(bytes);
+    // 初始化表属性
+    ZIPLIST_BYTES(zl) = intrev32ifbe(bytes);
+    ZIPLIST_TAIL_OFFSET(zl) = intrev32ifbe(ZIPLIST_HEADER_SIZE);
+    ZIPLIST_LENGTH(zl) = 0;
+    // 设置表末端
+    zl[bytes-1] = ZIP_END;
+    return zl;
+}
+```
+
+#### 插入数据
+```
+//插入数据
+//将长度为slen的字节数组s插入到zl中，where决定了插入的方向（表头or表尾）
+unsigned char *ziplistPush(unsigned char *zl, unsigned char *s, unsigned int slen, int where) {
+    unsigned char *p;
+    p = (where == ZIPLIST_HEAD) ? ZIPLIST_ENTRY_HEAD(zl) : ZIPLIST_ENTRY_END(zl);
+    return __ziplistInsert(zl,p,s,slen);
+}
+```
+
+```
+//插入数据，将s插入到p指针所指的位置
+static unsigned char *__ziplistInsert(unsigned char *zl, unsigned char *p, unsigned char *s, unsigned int slen) {
+    size_t curlen = intrev32ifbe(ZIPLIST_BYTES(zl)), reqlen;
+    unsigned int prevlensize, prevlen = 0;
+    size_t offset;
+    int nextdiff = 0;
+    unsigned char encoding = 0;
+    long long value = 123456789; 
+    zlentry tail;
+
+    //找到p指针所指的当前节点的prevlen的大小
+    if (p[0] != ZIP_END) {  //p指针指向的不是列表尾部
+        ZIP_DECODE_PREVLEN(p, prevlensize, prevlen);
+    } else {  //p指针指向列表尾部
+        unsigned char *ptail = ZIPLIST_ENTRY_TAIL(zl);
+        if (ptail[0] != ZIP_END) {
+            prevlen = zipRawEntryLength(ptail);
+        }
+    }
+
+    //确定传入字符的编码
+    //尝试将其转换为整数，如果成功，value将保存转换后的整数值，encoding为value对应的编码方式
+    //reqlen保存的是当前节点值的长度
+    if (zipTryEncoding(s,slen,&value,&encoding)) {
+        reqlen = zipIntSize(encoding);
+    } else {  //传入的是字符串
+        reqlen = slen;
+    }
+    //计算编码前置节点的长度所需的大小
+    reqlen += zipPrevEncodeLength(NULL,prevlen);
+    //计算编码当前节点的长度所需的大小
+    reqlen += zipEncodeLength(NULL,encoding,slen);
+
+    //如果插入的位置不在尾部的话，需要检查后一个节点的header能否编码插入节点的长度
+    //nextdiff不为0，则需要对后置节点进行扩容
+    nextdiff = (p[0] != ZIP_END) ? zipPrevLenByteDiff(p,reqlen) : 0;
+
+    //realloc操作可能会改变zl指针指向的地址，所以这里要记录p指针相对zl的偏移量，以便还原p指针的位置
+    offset = p-zl;
+    //对压缩列表空间进行扩容
+    zl = ziplistResize(zl,curlen+reqlen+nextdiff);
+    p = zl+offset;
+
+    if (p[0] != ZIP_END) {
+        //移动现有元素，为插入的节点腾出位置
+        memmove(p+reqlen,p-nextdiff,curlen-offset-1+nextdiff);
+
+        //将新节点的长度编码至后置节点
+        zipPrevEncodeLength(p+reqlen,reqlen);
+
+        //更新列表到达表尾的偏移量
+        ZIPLIST_TAIL_OFFSET(zl) =
+            intrev32ifbe(intrev32ifbe(ZIPLIST_TAIL_OFFSET(zl))+reqlen);
+
+        tail = zipEntry(p+reqlen);
+        if (p[reqlen+tail.headersize+tail.len] != ZIP_END) {
+            ZIPLIST_TAIL_OFFSET(zl) =
+                intrev32ifbe(intrev32ifbe(ZIPLIST_TAIL_OFFSET(zl))+nextdiff);
+        }
+    } else {
+        //新元素是表尾节点
+        ZIPLIST_TAIL_OFFSET(zl) = intrev32ifbe(p-zl);
+    }
+
+    //nextdiff不为0，需要更新后置节点header的长度
+    if (nextdiff != 0) {
+        offset = p-zl;
+        zl = __ziplistCascadeUpdate(zl,p+reqlen);
+        p = zl+offset;
+    }
+
+    //将前置节点的长度写入新节点的header
+    p += zipPrevEncodeLength(p,prevlen);
+    //将当前节点元素的长度写入节点的header
+    p += zipEncodeLength(p,encoding,slen);
+    //写入节点值
+    if (ZIP_IS_STR(encoding)) {  //写入字符串
+        memcpy(p,s,slen);
+    } else {  //写入整数
+        zipSaveInteger(p,value,encoding);
+    }
+    //更新列表中节点数量
+    ZIPLIST_INCR_LENGTH(zl,1);
+    return zl;
+}
+```
+
+#### 删除数据
+
+```
+//删除*p所指向的节点
+unsigned char *ziplistDelete(unsigned char *zl, unsigned char **p) {
+    //删除过程中会进行内存充分配，可能改变zl的地址，所以需要记录偏移量，以计算删除后*p的位置
+    size_t offset = *p-zl;
+    zl = __ziplistDelete(zl,*p,1);
+
+    /* Store pointer to current element in p, because ziplistDelete will
+     * do a realloc which might result in a different "zl"-pointer.
+     * When the delete direction is back to front, we might delete the last
+     * entry and end up with "p" pointing to ZIP_END, so check this. */
+    *p = zl+offset;
+    return zl;
+}
+```
+
+```
+//删除从p指向位置开始的num个节点
+static unsigned char *__ziplistDelete(unsigned char *zl, unsigned char *p, unsigned int num) {
+    unsigned int i, totlen, deleted = 0;
+    size_t offset;
+    int nextdiff = 0;
+    zlentry first, tail;
+
+    //记录p指向的节点first（删除的起始节点）
+    first = zipEntry(p);
+    for (i = 0; p[0] != ZIP_END && i < num; i++) {
+        //计算p指向节点占用的总字节数，将p移至下一节点
+        p += zipRawEntryLength(p);
+        deleted++;
+    }
+
+    totlen = p-first.p;  //totlen为删除的总字节数
+    if (totlen > 0) {
+        //如果删除节点的后置还有节点
+        if (p[0] != ZIP_END) {
+            nextdiff = zipPrevLenByteDiff(p,first.prevrawlen);
+            p -= nextdiff;
+            zipPrevEncodeLength(p,first.prevrawlen);
+
+            //更新到表尾的偏移量
+            ZIPLIST_TAIL_OFFSET(zl) =
+                intrev32ifbe(intrev32ifbe(ZIPLIST_TAIL_OFFSET(zl))-totlen);
+
+            tail = zipEntry(p);
+            if (p[tail.headersize+tail.len] != ZIP_END) {
+                ZIPLIST_TAIL_OFFSET(zl) =
+                   intrev32ifbe(intrev32ifbe(ZIPLIST_TAIL_OFFSET(zl))+nextdiff);
+            }
+
+            //将后置节点位置向前移动，覆盖删除节点的数据
+            memmove(first.p,p,
+                intrev32ifbe(ZIPLIST_BYTES(zl))-(p-zl)-1);
+        } else {  //删除节点的后置为空
+            //更新到表尾的偏移量
+            ZIPLIST_TAIL_OFFSET(zl) =
+                intrev32ifbe((first.p-zl)-first.prevrawlen);
+        }
+
+        offset = first.p-zl;
+        //对压缩列表的空间进行缩容，并在结尾添加标记字符ZIP_END
+        zl = ziplistResize(zl, intrev32ifbe(ZIPLIST_BYTES(zl))-totlen+nextdiff);
+        ZIPLIST_INCR_LENGTH(zl,-deleted);
+        p = zl+offset;
+
+        //如果nextdiff不为0，更新p指向后置节点的大小
+        if (nextdiff != 0)
+            zl = __ziplistCascadeUpdate(zl,p);
+    }
+    return zl;
+}
+```
+
+```
+//计算p指向节点所占用的字节数
+static unsigned int zipRawEntryLength(unsigned char *p) {
+    unsigned int prevlensize, encoding, lensize, len;
+    ZIP_DECODE_PREVLENSIZE(p, prevlensize);
+    ZIP_DECODE_LENGTH(p + prevlensize, encoding, lensize, len);
+    return prevlensize + lensize + len;
+}
+```
+
+#### 查找数据
+
+```
+//查找节点值和str相等的列表节点，skip为每次比较跳过的节点数
+unsigned char *ziplistFind(unsigned char *p, unsigned char *vstr, unsigned int vlen, unsigned int skip) {
+    int skipcnt = 0;
+    unsigned char vencoding = 0;
+    long long vll = 0;
+
+    while (p[0] != ZIP_END) {
+        unsigned int prevlensize, encoding, lensize, len;
+        unsigned char *q;
+
+        ZIP_DECODE_PREVLENSIZE(p, prevlensize);
+        ZIP_DECODE_LENGTH(p + prevlensize, encoding, lensize, len);
+        //q记录的是节点值的起始地址
+        q = p + prevlensize + lensize;
+
+        if (skipcnt == 0) {
+            //对字符串类型的数据进行比较
+            if (ZIP_IS_STR(encoding)) {  
+                if (len == vlen && memcmp(q, vstr, vlen) == 0) {
+                    return p;
+                }
+            } else {  //对整数类型的数据进行比较
+                if (vencoding == 0) {
+                    if (!zipTryEncoding(vstr, vlen, &vll, &vencoding)) {
+                        vencoding = UCHAR_MAX;
+                    }
+                    assert(vencoding);
+                }
+
+                if (vencoding != UCHAR_MAX) {
+                    long long ll = zipLoadInteger(q, encoding);
+                    if (ll == vll) {
+                        return p;
+                    }
+                }
+            }
+
+            skipcnt = skip;
+        } else {
+            skipcnt--;
+        }
+
+        //移动指针，指向下一个节点
+        p = q + len;
+    }
+
+    return NULL;
+}
+```
+
