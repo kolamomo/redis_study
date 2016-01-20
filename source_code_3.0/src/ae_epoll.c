@@ -31,26 +31,31 @@
 
 #include <sys/epoll.h>
 
+//事件状态
 typedef struct aeApiState {
-    int epfd;
-    struct epoll_event *events;
+    int epfd;   //epoll 实例对应的fd
+    struct epoll_event *events;  //事件队列
 } aeApiState;
 
+//创建epoll实例，并将其赋值给eventLoop
 static int aeApiCreate(aeEventLoop *eventLoop) {
     aeApiState *state = zmalloc(sizeof(aeApiState));
 
     if (!state) return -1;
+    //为state的事件队列申请空间
     state->events = zmalloc(sizeof(struct epoll_event)*eventLoop->setsize);
     if (!state->events) {
         zfree(state);
         return -1;
     }
+    //创建epoll实例
     state->epfd = epoll_create(1024); /* 1024 is just a hint for the kernel */
     if (state->epfd == -1) {
         zfree(state->events);
         zfree(state);
         return -1;
     }
+    //将事件状态赋给eventLoop
     eventLoop->apidata = state;
     return 0;
 }
@@ -70,24 +75,29 @@ static void aeApiFree(aeEventLoop *eventLoop) {
     zfree(state);
 }
 
+//添加事件到epoll中
 static int aeApiAddEvent(aeEventLoop *eventLoop, int fd, int mask) {
     aeApiState *state = eventLoop->apidata;
     struct epoll_event ee;
     /* If the fd was already monitored for some event, we need a MOD
      * operation. Otherwise we need an ADD operation. */
+    //如果fd没有关联任何事件，这是一个add操作；如果关联了事件，这是一个mod操作
     int op = eventLoop->events[fd].mask == AE_NONE ?
             EPOLL_CTL_ADD : EPOLL_CTL_MOD;
 
+    //设置要注册事件的fd和类型
     ee.events = 0;
     mask |= eventLoop->events[fd].mask; /* Merge old events */
     if (mask & AE_READABLE) ee.events |= EPOLLIN;
     if (mask & AE_WRITABLE) ee.events |= EPOLLOUT;
     ee.data.u64 = 0; /* avoid valgrind warning */
     ee.data.fd = fd;
+    //调用epoll的事件注册函数注册事件
     if (epoll_ctl(state->epfd,op,fd,&ee) == -1) return -1;
     return 0;
 }
 
+//从epoll中删除事件
 static void aeApiDelEvent(aeEventLoop *eventLoop, int fd, int delmask) {
     aeApiState *state = eventLoop->apidata;
     struct epoll_event ee;
@@ -107,16 +117,19 @@ static void aeApiDelEvent(aeEventLoop *eventLoop, int fd, int delmask) {
     }
 }
 
+//获取就绪事件
 static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
     aeApiState *state = eventLoop->apidata;
     int retval, numevents = 0;
 
+    //等待就绪事件的发生，如果没有设置timeout时间，则一直等待下去
     retval = epoll_wait(state->epfd,state->events,eventLoop->setsize,
             tvp ? (tvp->tv_sec*1000 + tvp->tv_usec/1000) : -1);
     if (retval > 0) {
         int j;
 
         numevents = retval;
+        //为就绪事件设置相应的类型，并加入到eventLoop的就绪事件数组中
         for (j = 0; j < numevents; j++) {
             int mask = 0;
             struct epoll_event *e = state->events+j;
@@ -129,6 +142,7 @@ static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
             eventLoop->fired[j].mask = mask;
         }
     }
+    //返回已就绪事件的个数
     return numevents;
 }
 

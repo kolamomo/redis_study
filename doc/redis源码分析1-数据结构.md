@@ -49,10 +49,18 @@ struct sdshdr {
 typedef char *sds;
 ```
 
+sdshdr结构体占8个字节（char buf[]这个占0个字节）  
+char *sds存放的是buf[]数组的首地址  
+struct sdshdr *sh = (void*)(s-(sizeof(struct sdshdr))) s向前移动8个字节即可得到sdshdr结构体的首地址
+
+
+#### 新建sds
+
 sds初始化时会创建一个刚好可以存放所需字节流大小的空间。
 
 ```
 //sds.c
+//新建一个sds字符串
 sds sdsnew(const char *init) {
     size_t initlen = (init == NULL) ? 0 : strlen(init);
     return sdsnewlen(init, initlen);
@@ -61,18 +69,105 @@ sds sdsnew(const char *init) {
 sds sdsnewlen(const void *init, size_t initlen) {
     struct sdshdr *sh;
 
-    if (init) {
+    //注意申请空间的长度需要+1，这是因为在字节流数组buf末尾需要加一个结束符字节‘\0’
+    //根据是否需要初始化决定调用malloc还是calloc申请空间
+    if (init) { //zmalloc不初始化所分配的内存
         sh = zmalloc(sizeof(struct sdshdr)+initlen+1);
-    } else {
+    } else {   //zcalloc将分配的内存初始化为0
         sh = zcalloc(sizeof(struct sdshdr)+initlen+1);
     }
     if (sh == NULL) return NULL;
     sh->len = initlen;
     sh->free = 0;
+    //将init的数据复制到新建的sds的数据流buf中
     if (initlen && init)
         memcpy(sh->buf, init, initlen);
-    sh->buf[initlen] = '\0';
+    sh->buf[initlen] = '\0';  //添加结束符
     return (char*)sh->buf;
+}
+```
+
+#### 拼接数据
+
+```
+//拼接数据t到sds的末尾
+sds sdscat(sds s, const char *t) {
+    return sdscatlen(s, t, strlen(t));
+}
+
+sds sdscatlen(sds s, const void *t, size_t len) {
+    struct sdshdr *sh;
+    size_t curlen = sdslen(s);  //获取当前sds的已使用长度
+
+    s = sdsMakeRoomFor(s,len); //扩展sds的空间
+    if (s == NULL) return NULL;
+    sh = (void*) (s-(sizeof(struct sdshdr))); //获取sdshdr结构体的指针
+    memcpy(s+curlen, t, len);  //复制t的数据到字符串的剩余空间
+    //更新字符串的已使用长度和剩余长度
+    sh->len = curlen+len; 
+    sh->free = sh->free-len;
+    //设置结束符
+    s[curlen+len] = '\0';
+    return s;
+}
+```
+
+```
+//扩展sds的空间，确保函数执行后，buf至少有addlen+1 长度的空余空间
+//每次扩容时，会多分配一些额外空间，以免每次拼接都需要进行扩容
+sds sdsMakeRoomFor(sds s, size_t addlen) {
+    struct sdshdr *sh, *newsh;
+    size_t free = sdsavail(s);  //获取sds的剩余空间
+    size_t len, newlen;
+
+    //剩余空间足够，无需扩展，直接返回
+    if (free >= addlen) return s; 
+    len = sdslen(s);
+    sh = (void*) (s-(sizeof(struct sdshdr)));
+    //s至少需要的长度
+    newlen = (len+addlen);  
+    //如果newlen小于SDS_MAX_PREALLOC（默认1M），则将newlen翻倍
+    if (newlen < SDS_MAX_PREALLOC)
+        newlen *= 2;
+    //如果newlen大于1M，则将newlen加上1M的大小
+    else
+        newlen += SDS_MAX_PREALLOC;
+    //根据新的长度分配空间（原有的数据不会被清除）
+    newsh = zrealloc(sh, sizeof(struct sdshdr)+newlen+1);
+    if (newsh == NULL) return NULL;
+
+    newsh->free = newlen - len; //更新剩余空间
+    return newsh->buf;
+}
+```
+
+#### 重新赋值
+
+```
+//将数据t放入s中
+sds sdscpy(sds s, const char *t) {
+    return sdscpylen(s, t, strlen(t));
+}
+
+sds sdscpylen(sds s, const char *t, size_t len) {
+    //这里通过buf的指针减去sdshdr长度得到sdshdr结构体的指针
+    struct sdshdr *sh = (void*) (s-(sizeof(struct sdshdr)));
+    size_t totlen = sh->free+sh->len;
+
+    //如果原sds的总长度小于新的字符串长度，需要扩展空间
+    if (totlen < len) {
+        s = sdsMakeRoomFor(s,len-sh->len);  
+        if (s == NULL) return NULL;
+        sh = (void*) (s-(sizeof(struct sdshdr)));
+        totlen = sh->free+sh->len; //获取总长度
+    }
+    //将数据t拷贝到s中
+    memcpy(s, t, len);
+    s[len] = '\0';
+    //更新已使用长度和剩余长度
+    sh->len = len;
+    sh->free = totlen-len;
+    return s;
 }
 ```
 
@@ -100,6 +195,99 @@ typedef struct list {  //声明链表
     int (*match)(void *ptr, void *key);  //比较节点的值与传入的值是否相等
     unsigned long len;
 } list;
+```
+
+#### 创建list
+
+```
+//创建双向链表 
+list *listCreate(void)
+{
+    struct list *list;
+
+    if ((list = zmalloc(sizeof(*list))) == NULL)  //申请空间
+        return NULL;
+    list->head = list->tail = NULL;
+    list->len = 0;
+    list->dup = NULL;
+    list->free = NULL;
+    list->match = NULL;
+    return list;
+}
+```
+
+#### 插入数据
+
+```
+//从链表头部插入数据
+list *listAddNodeHead(list *list, void *value)
+{
+    listNode *node;
+
+    if ((node = zmalloc(sizeof(*node))) == NULL) //为链表节点申请空间
+        return NULL;
+    node->value = value;  //为节点设置value
+    if (list->len == 0) {  //链表为空的情况
+        list->head = list->tail = node;
+        node->prev = node->next = NULL;
+    } else {  //链表非空的情况
+        node->prev = NULL;
+        node->next = list->head;
+        list->head->prev = node;
+        list->head = node;
+    }
+    list->len++;  //链表计数加1
+    return list;
+}
+```
+
+#### 删除数据
+
+```
+//从链表中删除node节点
+void listDelNode(list *list, listNode *node)
+{
+    if (node->prev)  //node非头节点
+        node->prev->next = node->next;
+    else  //node为头节点
+        list->head = node->next;
+    if (node->next)  //node非尾节点
+        node->next->prev = node->prev;
+    else  //node为尾节点
+        list->tail = node->prev;
+    if (list->free) list->free(node->value);
+    zfree(node); //释放空间
+    list->len--;
+}
+```
+
+#### 查找数据
+
+```
+//在双向链表中查找数据为key的节点
+listNode *listSearchKey(list *list, void *key)
+{
+    listIter *iter;
+    listNode *node;
+
+    iter = listGetIterator(list, AL_START_HEAD); //获取从头部开始的迭代器
+    while((node = listNext(iter)) != NULL) {
+        //判断是否定义了比较节点数据的match方法，如果没有定义了，则调用match方法进行比较
+        if (list->match) {  
+            if (list->match(node->value, key)) {
+                listReleaseIterator(iter);
+                return node;
+            }
+        } else {  //没有定义match方法，则比较数据指针
+            if (key == node->value) {
+                listReleaseIterator(iter);
+                return node;
+            }
+        }
+    }
+    listReleaseIterator(iter);
+    return NULL;
+}
 ```
 
 ### hash表
@@ -290,7 +478,7 @@ dictEntry *dictFind(dict *d, const void *key)
     dictEntry *he;
     unsigned int h, idx, table;
 
-    if (d->ht[0].size == 0) return NULL; /* We don't have a table at all */
+    if (d->ht[0].size == 0) return NULL;
     if (dictIsRehashing(d)) _dictRehashStep(d);
     h = dictHashKey(d, key);  
     for (table = 0; table <= 1; table++) {
@@ -442,6 +630,194 @@ typedef struct zskiplist {
     unsigned long length;  //长度
     int level;    //层数
 } zskiplist;
+```
+
+#### 创建跳跃表
+
+```
+//创建跳跃表
+zskiplist *zslCreate(void) {
+    int j;
+    zskiplist *zsl;
+
+    //分配空间
+    zsl = zmalloc(sizeof(*zsl));
+
+    //设置高度和起始层数
+    zsl->level = 1;
+    zsl->length = 0;
+    //初始化表头节点，最大层数默认为32
+    zsl->header = zslCreateNode(ZSKIPLIST_MAXLEVEL,0,NULL);
+    for (j = 0; j < ZSKIPLIST_MAXLEVEL; j++) {
+        zsl->header->level[j].forward = NULL;
+        zsl->header->level[j].span = 0;
+    }
+    zsl->header->backward = NULL;
+    //设置表尾
+    zsl->tail = NULL;
+    return zsl;
+}
+```
+
+#### 插入数据
+
+```
+//创建一个成员为obj，分值为score的节点，并将节点插入到跳跃表中
+zskiplistNode *zslInsert(zskiplist *zsl, double score, robj *obj) {
+    //update数组保存各层的插入位置
+    zskiplistNode *update[ZSKIPLIST_MAXLEVEL], *x;
+    //rank数组记录各层达到插入位置所跨越的节点数
+    unsigned int rank[ZSKIPLIST_MAXLEVEL];
+    int i, level;
+
+    redisAssert(!isnan(score));
+    x = zsl->header; 
+    //从顶层开始查找节点的插入位置
+    for (i = zsl->level-1; i >= 0; i--) {
+        //rank[i]初始化为上一层所跨越的节点总数
+        rank[i] = i == (zsl->level-1) ? 0 : rank[i+1];
+        //比较当前节点与插入节点的score（score相同的情况下，比较value）
+        //当前节点分值小于插入节点时，向前移动
+        while (x->level[i].forward &&
+            (x->level[i].forward->score < score ||
+                (x->level[i].forward->score == score &&
+                compareStringObjects(x->level[i].forward->obj,obj) < 0))) {
+            rank[i] += x->level[i].span;  //更新跨度
+            x = x->level[i].forward;
+        }
+        //记录第i层的插入位置
+        update[i] = x;
+    }
+    //获取一个随机值作为新节点的层数
+    level = zslRandomLevel();
+    //如果新节点的层数大于当前跳跃表的最大层数，需要更新跳跃表头节点中未使用的层
+    if (level > zsl->level) {
+        for (i = zsl->level; i < level; i++) {
+            rank[i] = 0;
+            update[i] = zsl->header;  //未使用层插入位置都是头结点
+            update[i]->level[i].span = zsl->length; //跨度初始化为整个跳跃表的长度
+        }
+        zsl->level = level;
+    }
+    //创建新节点
+    x = zslCreateNode(level,score,obj);
+    //遍历跳跃表的各层，进行插入
+    for (i = 0; i < level; i++) {
+        x->level[i].forward = update[i]->level[i].forward;
+        update[i]->level[i].forward = x;
+
+        //   |        update[i]                           update[i]->forward
+        // i | ......... | .......... | ....................... |  
+        // . | ... | ... | .......... | ....................... |  
+        // . | ... | ... | ... | .... | ....... | ............. |
+        // 0 | ... | ... | ... | .... | ....... | ............. | 
+        //                 update[0]  x    update[0]->forward
+        //更新跨度
+        //x->level[i].span = update[i]->level[i].span + 1 - (rank[0]-rank[i] + 1) = update[i]->level[i].span - (rank[0] - rank[i])
+        x->level[i].span = update[i]->level[i].span - (rank[0] - rank[i]);
+        update[i]->level[i].span = (rank[0] - rank[i]) + 1;
+    }
+
+    //如果新节点的level小于原来skiplist的level，那么在上层没有insert新节点的span需要加1
+    for (i = level; i < zsl->level; i++) {
+        update[i]->level[i].span++;
+    }
+
+    //为新插入的节点设置前置节点
+    x->backward = (update[0] == zsl->header) ? NULL : update[0];
+    if (x->level[0].forward)
+        x->level[0].forward->backward = x;
+    else
+        zsl->tail = x;
+    zsl->length++;  //跳跃表计数加1
+    return x;
+}
+```
+
+#### 删除数据
+
+```
+//从跳跃表中删除指定的节点
+int zslDelete(zskiplist *zsl, double score, robj *obj) {
+    zskiplistNode *update[ZSKIPLIST_MAXLEVEL], *x;
+    int i;
+
+    x = zsl->header;
+    //从头结点开始，从最高层到最底层遍历，确定每层删除节点的前置节点
+    for (i = zsl->level-1; i >= 0; i--) {
+        while (x->level[i].forward &&
+            (x->level[i].forward->score < score ||
+                (x->level[i].forward->score == score &&
+                compareStringObjects(x->level[i].forward->obj,obj) < 0)))
+            x = x->level[i].forward;
+        update[i] = x;
+    }
+    x = x->level[0].forward;
+    //判断x是否为指定的节点，如果不是，返回0；如果是，进行删除节点操作
+    if (x && score == x->score && equalStringObjects(x->obj,obj)) {
+        zslDeleteNode(zsl, x, update);
+        zslFreeNode(x);
+        return 1;
+    }
+    return 0; 
+}
+
+```
+
+```
+//从跳跃表中删除节点x
+void zslDeleteNode(zskiplist *zsl, zskiplistNode *x, zskiplistNode **update) {
+    int i;
+    //遍历跳跃表的各层，进行删除操作，并更新跨度
+    for (i = 0; i < zsl->level; i++) {
+        //如果在第i层update节点的后置节点指向x，则需要更新指向关系以及跨度
+        if (update[i]->level[i].forward == x) {
+            update[i]->level[i].span += x->level[i].span - 1;
+            update[i]->level[i].forward = x->level[i].forward;
+        } else { //否则，不需要更新指向关系，将跨度见1即可
+            update[i]->level[i].span -= 1;
+        }
+    }
+    //更新被删除节点x的后置节点的前置指针
+    if (x->level[0].forward) {
+        x->level[0].forward->backward = x->backward;
+    } else {
+        zsl->tail = x->backward;
+    }
+    //如果被删除节点是跳跃表中层数最高的节点，还需要更新跳跃表的最大层数
+    while(zsl->level > 1 && zsl->header->level[zsl->level-1].forward == NULL)
+        zsl->level--;
+    zsl->length--;  //跳跃表计数减1
+}
+```
+
+#### 查找数据
+
+```
+//查找给定score和对象的节点在跳跃表中的位置，如不在跳跃表中，返回0
+unsigned long zslGetRank(zskiplist *zsl, double score, robj *o) {
+    zskiplistNode *x;
+    unsigned long rank = 0;
+    int i;
+
+    x = zsl->header;
+    //从头结点从最高层开始逐层遍历跳跃表进行查找
+    for (i = zsl->level-1; i >= 0; i--) {
+        while (x->level[i].forward &&
+            (x->level[i].forward->score < score ||
+                (x->level[i].forward->score == score &&
+                compareStringObjects(x->level[i].forward->obj,o) <= 0))) {
+            rank += x->level[i].span;
+            x = x->level[i].forward;
+        }
+
+        //判断成员对象是否相等
+        if (x->obj && equalStringObjects(x->obj,o)) {
+            return rank;
+        }
+    }
+    return 0;
+}
 ```
 
 ### 整数集合

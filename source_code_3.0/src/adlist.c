@@ -38,11 +38,12 @@
  * by the user before to call AlFreeList().
  *
  * On error, NULL is returned. Otherwise the pointer to the new list. */
+//创建双向链表
 list *listCreate(void)
 {
     struct list *list;
 
-    if ((list = zmalloc(sizeof(*list))) == NULL)
+    if ((list = zmalloc(sizeof(*list))) == NULL)  //申请空间
         return NULL;
     list->head = list->tail = NULL;
     list->len = 0;
@@ -77,23 +78,24 @@ void listRelease(list *list)
  * On error, NULL is returned and no operation is performed (i.e. the
  * list remains unaltered).
  * On success the 'list' pointer you pass to the function is returned. */
+//从链表头部插入数据
 list *listAddNodeHead(list *list, void *value)
 {
     listNode *node;
 
-    if ((node = zmalloc(sizeof(*node))) == NULL)
+    if ((node = zmalloc(sizeof(*node))) == NULL) //为链表节点申请空间
         return NULL;
-    node->value = value;
-    if (list->len == 0) {
+    node->value = value;  //为节点设置value
+    if (list->len == 0) {  //链表为空的情况
         list->head = list->tail = node;
         node->prev = node->next = NULL;
-    } else {
+    } else {  //链表非空的情况
         node->prev = NULL;
         node->next = list->head;
         list->head->prev = node;
         list->head = node;
     }
-    list->len++;
+    list->len++;  //链表计数加1
     return list;
 }
 
@@ -156,15 +158,16 @@ list *listInsertNode(list *list, listNode *old_node, void *value, int after) {
  * It's up to the caller to free the private value of the node.
  *
  * This function can't fail. */
+//从链表中删除node节点
 void listDelNode(list *list, listNode *node)
 {
-    if (node->prev)
+    if (node->prev)  //node非头节点
         node->prev->next = node->next;
-    else
+    else  //node为头节点
         list->head = node->next;
-    if (node->next)
+    if (node->next)  //node非尾节点
         node->next->prev = node->prev;
-    else
+    else  //node为尾节点
         list->tail = node->prev;
     if (list->free) list->free(node->value);
     zfree(node);
@@ -282,19 +285,21 @@ list *listDup(list *orig)
  * On success the first matching node pointer is returned
  * (search starts from head). If no matching node exists
  * NULL is returned. */
+//在双向链表中查找数据为key的节点
 listNode *listSearchKey(list *list, void *key)
 {
     listIter *iter;
     listNode *node;
 
-    iter = listGetIterator(list, AL_START_HEAD);
+    iter = listGetIterator(list, AL_START_HEAD); //获取从头部开始的迭代器
     while((node = listNext(iter)) != NULL) {
+        //判断是否定义了比较节点数据的match方法，如果没有定义了，则调用match方法进行比较
         if (list->match) {
             if (list->match(node->value, key)) {
                 listReleaseIterator(iter);
                 return node;
             }
-        } else {
+        } else {  //没有定义match方法，则比较数据指针
             if (key == node->value) {
                 listReleaseIterator(iter);
                 return node;

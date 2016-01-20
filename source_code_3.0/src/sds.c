@@ -52,17 +52,19 @@ sds sdsnewlen(const void *init, size_t initlen) {
     struct sdshdr *sh;
 
     //注意申请空间的长度需要+1，这是因为在字节流数组buf末尾需要加一个结束符字节‘\0’
-    if (init) { //根据是否需要初始化决定调用malloc还是calloc申请空间
+    //根据是否需要初始化决定调用malloc还是calloc申请空间
+    if (init) { //zmalloc不初始化所分配的内存
         sh = zmalloc(sizeof(struct sdshdr)+initlen+1);
-    } else {
+    } else {   //zcalloc将分配的内存初始化为0
         sh = zcalloc(sizeof(struct sdshdr)+initlen+1);
     }
     if (sh == NULL) return NULL;
     sh->len = initlen;
     sh->free = 0;
+    //将init的数据复制到新建的sds的数据流buf中
     if (initlen && init)
         memcpy(sh->buf, init, initlen);
-    sh->buf[initlen] = '\0';
+    sh->buf[initlen] = '\0';  //添加结束符
     return (char*)sh->buf;
 }
 
@@ -73,6 +75,7 @@ sds sdsempty(void) {
 }
 
 /* Create a new sds string starting from a null terminated C string. */
+//新建一个sds字符串
 sds sdsnew(const char *init) {
     size_t initlen = (init == NULL) ? 0 : strlen(init);
     return sdsnewlen(init, initlen);
@@ -127,23 +130,30 @@ void sdsclear(sds s) {
  *
  * Note: this does not change the *length* of the sds string as returned
  * by sdslen(), but only the free buffer space we have. */
+//扩展sds的空间，确保函数执行后，buf至少有addlen+1 长度的空余空间
+//每次扩容时，会多分配一些额外空间，以免每次拼接都需要进行扩容
 sds sdsMakeRoomFor(sds s, size_t addlen) {
     struct sdshdr *sh, *newsh;
-    size_t free = sdsavail(s);
+    size_t free = sdsavail(s);  //获取sds的剩余空间
     size_t len, newlen;
 
+    //剩余空间足够，无需扩展，直接返回
     if (free >= addlen) return s;
     len = sdslen(s);
     sh = (void*) (s-(sizeof(struct sdshdr)));
+    //s至少需要的长度
     newlen = (len+addlen);
+    //如果newlen小于SDS_MAX_PREALLOC（默认1M），则将newlen翻倍
     if (newlen < SDS_MAX_PREALLOC)
         newlen *= 2;
+    //如果newlen大于1M，则将newlen加上1M的大小
     else
         newlen += SDS_MAX_PREALLOC;
+    //根据新的长度分配空间（原有的数据不会被清除）
     newsh = zrealloc(sh, sizeof(struct sdshdr)+newlen+1);
     if (newsh == NULL) return NULL;
 
-    newsh->free = newlen - len;
+    newsh->free = newlen - len; //更新剩余空间
     return newsh->buf;
 }
 
@@ -237,16 +247,19 @@ sds sdsgrowzero(sds s, size_t len) {
  *
  * After the call, the passed sds string is no longer valid and all the
  * references must be substituted with the new pointer returned by the call. */
+//拼接数据t到sds的末尾
 sds sdscatlen(sds s, const void *t, size_t len) {
     struct sdshdr *sh;
-    size_t curlen = sdslen(s);
+    size_t curlen = sdslen(s);  //获取当前sds的已使用长度
 
-    s = sdsMakeRoomFor(s,len);
+    s = sdsMakeRoomFor(s,len); //扩展sds的空间
     if (s == NULL) return NULL;
-    sh = (void*) (s-(sizeof(struct sdshdr)));
-    memcpy(s+curlen, t, len);
+    sh = (void*) (s-(sizeof(struct sdshdr))); //获取sdshdr结构体的指针
+    memcpy(s+curlen, t, len);  //复制t的数据到字符串的剩余空间
+    //更新字符串的已使用长度和剩余长度
     sh->len = curlen+len;
     sh->free = sh->free-len;
+    //设置结束符
     s[curlen+len] = '\0';
     return s;
 }
@@ -255,6 +268,7 @@ sds sdscatlen(sds s, const void *t, size_t len) {
  *
  * After the call, the passed sds string is no longer valid and all the
  * references must be substituted with the new pointer returned by the call. */
+//将数据t拼接到sds的末尾
 sds sdscat(sds s, const char *t) {
     return sdscatlen(s, t, strlen(t));
 }
@@ -274,14 +288,17 @@ sds sdscpylen(sds s, const char *t, size_t len) {
     struct sdshdr *sh = (void*) (s-(sizeof(struct sdshdr)));
     size_t totlen = sh->free+sh->len;
 
+    //如果原sds的总长度小于新的字符串长度，需要扩展空间
     if (totlen < len) {
         s = sdsMakeRoomFor(s,len-sh->len);
         if (s == NULL) return NULL;
         sh = (void*) (s-(sizeof(struct sdshdr)));
-        totlen = sh->free+sh->len;
+        totlen = sh->free+sh->len; //获取总长度
     }
+    //将数据t拷贝到s中
     memcpy(s, t, len);
     s[len] = '\0';
+    //更新已使用长度和剩余长度
     sh->len = len;
     sh->free = totlen-len;
     return s;
@@ -289,6 +306,7 @@ sds sdscpylen(sds s, const char *t, size_t len) {
 
 /* Like sdscpylen() but 't' must be a null-termined string so that the length
  * of the string is obtained with strlen(). */
+//将数据t放入s中
 sds sdscpy(sds s, const char *t) {
     return sdscpylen(s, t, strlen(t));
 }

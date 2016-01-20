@@ -123,7 +123,7 @@ zskiplistNode *zslInsert(zskiplist *zsl, double score, robj *obj) {
     int i, level;
 
     redisAssert(!isnan(score));
-    x = zsl->header; 
+    x = zsl->header;
     //从顶层开始查找节点的插入位置
     for (i = zsl->level-1; i >= 0; i--) {
         /* store rank that is crossed to reach the insert position */
@@ -164,6 +164,15 @@ zskiplistNode *zslInsert(zskiplist *zsl, double score, robj *obj) {
         update[i]->level[i].forward = x;
 
         /* update span covered by update[i] as x is inserted here */
+        //   |        update[i]                           update[i]->forward
+        // i | ......... | .......... | ....................... |
+        // . | ... | ... | .......... | ....................... |
+        // . | ... | ... | ... | .... | ....... | ............. |
+        // 0 | ... | ... | ... | .... | ....... | ............. |
+        //                 update[0]  x    update[0]->forward
+        //update[i]->level[i].span为从update[i]到update[i]->forward之间的跨度
+        //rank[0]-rank[i]为从update[i]到x之间的跨度
+        //x->level[i].span = update[i]->level[i].span + 1 - (rank[0]-rank[i] + 1) = update[i]->level[i].span - (rank[0] - rank[i])
         x->level[i].span = update[i]->level[i].span - (rank[0] - rank[i]);
         update[i]->level[i].span = (rank[0] - rank[i]) + 1;
     }
@@ -174,42 +183,50 @@ zskiplistNode *zslInsert(zskiplist *zsl, double score, robj *obj) {
         update[i]->level[i].span++;
     }
 
+    //为新插入的节点设置前置节点
     x->backward = (update[0] == zsl->header) ? NULL : update[0];
     if (x->level[0].forward)
         x->level[0].forward->backward = x;
     else
         zsl->tail = x;
-    zsl->length++;
+    zsl->length++;  //跳跃表计数加1
     return x;
 }
 
 /* Internal function used by zslDelete, zslDeleteByScore and zslDeleteByRank */
+//从跳跃表中删除节点x
 void zslDeleteNode(zskiplist *zsl, zskiplistNode *x, zskiplistNode **update) {
     int i;
+    //遍历跳跃表的各层，进行删除操作，并更新跨度
     for (i = 0; i < zsl->level; i++) {
+        //如果在第i层update节点的后置节点指向x，则需要更新指向关系以及跨度
         if (update[i]->level[i].forward == x) {
             update[i]->level[i].span += x->level[i].span - 1;
             update[i]->level[i].forward = x->level[i].forward;
-        } else {
+        } else { //否则，不需要更新指向关系，将跨度见1即可
             update[i]->level[i].span -= 1;
         }
     }
+    //更新被删除节点x的后置节点的前置指针
     if (x->level[0].forward) {
         x->level[0].forward->backward = x->backward;
     } else {
         zsl->tail = x->backward;
     }
+    //如果被删除节点是跳跃表中层数最高的节点，还需要更新跳跃表的最大层数
     while(zsl->level > 1 && zsl->header->level[zsl->level-1].forward == NULL)
         zsl->level--;
-    zsl->length--;
+    zsl->length--;  //跳跃表计数减1
 }
 
 /* Delete an element with matching score/object from the skiplist. */
+//从跳跃表中删除指定的节点
 int zslDelete(zskiplist *zsl, double score, robj *obj) {
     zskiplistNode *update[ZSKIPLIST_MAXLEVEL], *x;
     int i;
 
     x = zsl->header;
+    //从头结点开始，从最高层到最底层遍历，确定每层删除节点的前置节点
     for (i = zsl->level-1; i >= 0; i--) {
         while (x->level[i].forward &&
             (x->level[i].forward->score < score ||
@@ -221,6 +238,7 @@ int zslDelete(zskiplist *zsl, double score, robj *obj) {
     /* We may have multiple elements with the same score, what we need
      * is to find the element with both the right score and object. */
     x = x->level[0].forward;
+    //判断x是否为指定的节点，如果不是，返回0；如果是，进行删除节点操作
     if (x && score == x->score && equalStringObjects(x->obj,obj)) {
         zslDeleteNode(zsl, x, update);
         zslFreeNode(x);
@@ -403,12 +421,14 @@ unsigned long zslDeleteRangeByRank(zskiplist *zsl, unsigned int start, unsigned 
  * Returns 0 when the element cannot be found, rank otherwise.
  * Note that the rank is 1-based due to the span of zsl->header to the
  * first element. */
+//查找给定score和对象的节点在跳跃表中的位置，如不在跳跃表中，返回0
 unsigned long zslGetRank(zskiplist *zsl, double score, robj *o) {
     zskiplistNode *x;
     unsigned long rank = 0;
     int i;
 
     x = zsl->header;
+    //从头结点从最高层开始逐层遍历跳跃表进行查找
     for (i = zsl->level-1; i >= 0; i--) {
         while (x->level[i].forward &&
             (x->level[i].forward->score < score ||
@@ -419,6 +439,7 @@ unsigned long zslGetRank(zskiplist *zsl, double score, robj *o) {
         }
 
         /* x might be equal to zsl->header, so test if obj is non-NULL */
+        //判断成员对象是否相等
         if (x->obj && equalStringObjects(x->obj,o)) {
             return rank;
         }
