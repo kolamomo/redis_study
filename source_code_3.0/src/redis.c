@@ -1411,11 +1411,17 @@ void createSharedObjects(void) {
 void initServerConfig(void) {
     int j;
 
+    //设置服务器的运行id
     getRandomHexChars(server.runid,REDIS_RUN_ID_SIZE);
+    //设置默认配置文件路径
     server.configfile = NULL;
+    //设置默认服务器频率
     server.hz = REDIS_DEFAULT_HZ;
+    //为运行id加上结束符
     server.runid[REDIS_RUN_ID_SIZE] = '\0';
+    //设置服务器的地址模式
     server.arch_bits = (sizeof(long) == 8) ? 64 : 32;
+    //设置服务器的监听端口，默认为6379
     server.port = REDIS_SERVERPORT;
     server.tcp_backlog = REDIS_TCP_BACKLOG;
     server.bindaddr_count = 0;
@@ -1495,12 +1501,14 @@ void initServerConfig(void) {
     server.loading_process_events_interval_bytes = (1024*1024*2);
 
     server.lruclock = getLRUClock();
+    //初始化并设置持久化保存条件
     resetServerSaveParams();
 
     appendServerSaveParams(60*60,1);  /* save after 1 hour and 1 change */
     appendServerSaveParams(300,100);  /* save after 5 minutes and 100 changes */
     appendServerSaveParams(60,10000); /* save after 1 minute and 10000 changes */
     /* Replication related */
+    //初始化和复制相关的状态
     server.masterauth = NULL;
     server.masterhost = NULL;
     server.masterport = 6379;
@@ -1519,6 +1527,7 @@ void initServerConfig(void) {
     server.master_repl_offset = 0;
 
     /* Replication partial resync backlog */
+    //初始化PSYNC命令所使用的backlog
     server.repl_backlog = NULL;
     server.repl_backlog_size = REDIS_DEFAULT_REPL_BACKLOG_SIZE;
     server.repl_backlog_histlen = 0;
@@ -1528,10 +1537,12 @@ void initServerConfig(void) {
     server.repl_no_slaves_since = time(NULL);
 
     /* Client output buffer limits */
+    //设置客户端的输出缓冲区限制
     for (j = 0; j < REDIS_CLIENT_TYPE_COUNT; j++)
         server.client_obuf_limits[j] = clientBufferLimitsDefaults[j];
 
     /* Double constants initialization */
+    //初始化浮点常量
     R_Zero = 0.0;
     R_PosInf = 1.0/R_Zero;
     R_NegInf = -1.0/R_Zero;
@@ -1540,6 +1551,7 @@ void initServerConfig(void) {
     /* Command table -- we initiialize it here as it is part of the
      * initial configuration, since command names may be changed via
      * redis.conf using the rename-command directive. */
+    //初始化命令表
     server.commands = dictCreate(&commandTableDictType,NULL);
     server.orig_commands = dictCreate(&commandTableDictType,NULL);
     populateCommandTable();
@@ -1550,6 +1562,7 @@ void initServerConfig(void) {
     server.rpopCommand = lookupCommandByCString("rpop");
 
     /* Slow log */
+    //初始化慢查询日志
     server.slowlog_log_slower_than = REDIS_SLOWLOG_LOG_SLOWER_THAN;
     server.slowlog_max_len = REDIS_SLOWLOG_MAX_LEN;
 
@@ -1557,6 +1570,7 @@ void initServerConfig(void) {
     server.latency_monitor_threshold = REDIS_DEFAULT_LATENCY_MONITOR_THRESHOLD;
 
     /* Debugging */
+    //初始化调试选项
     server.assert_failed = "<no assertion failed>";
     server.assert_file = "<no file>";
     server.assert_line = 0;
