@@ -435,13 +435,16 @@ int anetWrite(int fd, char *buf, int count)
     return totlen;
 }
 
+//监听端口
 static int anetListen(char *err, int s, struct sockaddr *sa, socklen_t len, int backlog) {
+    //将socket与ip地址和端口进行绑定
     if (bind(s,sa,len) == -1) {
         anetSetError(err, "bind: %s", strerror(errno));
         close(s);
         return ANET_ERR;
     }
 
+    //socket监听请求
     if (listen(s, backlog) == -1) {
         anetSetError(err, "listen: %s", strerror(errno));
         close(s);
@@ -460,6 +463,7 @@ static int anetV6Only(char *err, int s) {
     return ANET_OK;
 }
 
+//创建socket，绑定地址并监听请求
 static int _anetTcpServer(char *err, int port, char *bindaddr, int af, int backlog)
 {
     int s, rv;
@@ -472,16 +476,20 @@ static int _anetTcpServer(char *err, int port, char *bindaddr, int af, int backl
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_flags = AI_PASSIVE;    /* No effect if bindaddr != NULL */
 
+    //获取ip地址，完成主机名到地址的解析，结果保存在servinfo链表中
     if ((rv = getaddrinfo(bindaddr,_port,&hints,&servinfo)) != 0) {
         anetSetError(err, "%s", gai_strerror(rv));
         return ANET_ERR;
     }
     for (p = servinfo; p != NULL; p = p->ai_next) {
+        //创建socket
         if ((s = socket(p->ai_family,p->ai_socktype,p->ai_protocol)) == -1)
             continue;
 
         if (af == AF_INET6 && anetV6Only(err,s) == ANET_ERR) goto error;
+        //设置可重用端口
         if (anetSetReuseAddr(err,s) == ANET_ERR) goto error;
+        //监听端口
         if (anetListen(err,s,p->ai_addr,p->ai_addrlen,backlog) == ANET_ERR) goto error;
         goto end;
     }
@@ -542,6 +550,7 @@ static int anetGenericAccept(char *err, int s, struct sockaddr *sa, socklen_t *l
     return fd;
 }
 
+//接收tcp连接，返回客户端的socket_fd
 int anetTcpAccept(char *err, int s, char *ip, size_t ip_len, int *port) {
     int fd;
     struct sockaddr_storage sa;
