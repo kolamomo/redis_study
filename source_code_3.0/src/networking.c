@@ -63,6 +63,7 @@ int listMatchObjects(void *a, void *b) {
 
 //创建一个新的客户端连接对象
 redisClient *createClient(int fd) {
+    //分配空间
     redisClient *c = zmalloc(sizeof(redisClient));
 
     /* passing -1 as fd it is possible to create a non connected client.
@@ -587,8 +588,9 @@ void copyClientOutputBuffer(redisClient *dst, redisClient *src) {
 }
 
 #define MAX_ACCEPTS_PER_CALL 1000
-//接收连接请求处理器
+//接收客户端命令，并进行相应处理
 static void acceptCommonHandler(int fd, int flags) {
+    //创建客户端
     redisClient *c;
     //创建客户端连接对象
     if ((c = createClient(fd)) == NULL) {
@@ -602,7 +604,8 @@ static void acceptCommonHandler(int fd, int flags) {
      * connection. Note that we create the client instead to check before
      * for this condition, since now the socket is already set in non-blocking
      * mode and we can send an error for free using the Kernel I/O */
-    //如果客户端超过了服务器设置的最大客户端数量，则向客户端写入错误信息，并关闭客户端
+    //如果服务器连接的客户端数量超限了，则关闭客户端
+    //这里先创建客户端再判断条件关闭是为了记录错误信息
     if (listLength(server.clients) > server.maxclients) {
         char *err = "-ERR max number of clients reached\r\n";
 
@@ -618,7 +621,8 @@ static void acceptCommonHandler(int fd, int flags) {
     c->flags |= flags;
 }
 
-//接收客户端请求
+//接收客户端的连接
+//服务端监听连接事件的回调函数
 void acceptTcpHandler(aeEventLoop *el, int fd, void *privdata, int mask) {
     int cport, cfd, max = MAX_ACCEPTS_PER_CALL;
     char cip[REDIS_IP_STR_LEN];
@@ -627,6 +631,7 @@ void acceptTcpHandler(aeEventLoop *el, int fd, void *privdata, int mask) {
     REDIS_NOTUSED(privdata);
 
     while(max--) {
+        //accept客户端的连接
         cfd = anetTcpAccept(server.neterr, fd, cip, sizeof(cip), &cport);
         if (cfd == ANET_ERR) {
             if (errno != EWOULDBLOCK)
@@ -635,6 +640,7 @@ void acceptTcpHandler(aeEventLoop *el, int fd, void *privdata, int mask) {
             return;
         }
         redisLog(REDIS_VERBOSE,"Accepted %s:%d", cip, cport);
+        //接收客户端的命令，并进行相应处理
         acceptCommonHandler(cfd,0);
     }
 }

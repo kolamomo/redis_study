@@ -1071,7 +1071,15 @@ void updateCachedTime(void) {
  * so in order to throttle execution of things we want to do less frequently
  * a macro is used: run_with_period(milliseconds) { .... }
  */
-
+//定时事件回调函数
+//采用异步执行，主要指定的操作有：
+//1. 主动清除过期键
+//2. 更新监控watchdog的信息
+//3. 更新统计信息
+//4. 对数据库进行渐进式rehash
+//5. 触发BGSAVE或AOF重写
+//6. 处理客户端超时
+//7. 复制重连 等等
 int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     int j;
     REDIS_NOTUSED(eventLoop);
@@ -1679,13 +1687,16 @@ void checkTcpBacklogSettings(void) {
  * impossible to bind, or no bind addresses were specified in the server
  * configuration but the function is not able to bind * for at least
  * one of the IPv4 or IPv6 protocols. */
+//根据server配置的ip地址，绑定地址并监听端口
 int listenToPort(int port, int *fds, int *count) {
     int j;
 
     /* Force binding of 0.0.0.0 if no bind address is specified, always
      * entering the loop if j == 0. */
+    //如果没有指定绑定的地址，默认绑定0.0.0.0
     if (server.bindaddr_count == 0) server.bindaddr[0] = NULL;
     for (j = 0; j < server.bindaddr_count || j == 0; j++) {
+        //如果没有指定绑定地址，则同事绑定ipv6和ipv4
         if (server.bindaddr[j] == NULL) {
             /* Bind * for both IPv6 and IPv4, we enter here only if
              * server.bindaddr_count == 0. */
@@ -1705,11 +1716,15 @@ int listenToPort(int port, int *fds, int *count) {
              * otherwise fds[*count] will be ANET_ERR and we'll print an
              * error and return to the caller with an error. */
             if (*count) break;
-        } else if (strchr(server.bindaddr[j],':')) {
+        }
+        //指定的绑定地址为ipv6,则绑定ipv6的地址并监听
+        else if (strchr(server.bindaddr[j],':')) {
             /* Bind IPv6 address. */
             fds[*count] = anetTcp6Server(server.neterr,port,server.bindaddr[j],
                 server.tcp_backlog);
-        } else {
+        }
+        //指定的绑定地址为ipv4,则绑定ipv4的地址并监听
+        else {
             /* Bind IPv4 address. */
             fds[*count] = anetTcpServer(server.neterr,port,server.bindaddr[j],
                 server.tcp_backlog);
@@ -1721,6 +1736,7 @@ int listenToPort(int port, int *fds, int *count) {
                 port, server.neterr);
             return REDIS_ERR;
         }
+        //设置为非阻塞模式
         anetNonBlock(NULL,fds[*count]);
         (*count)++;
     }
@@ -2067,12 +2083,15 @@ void forceCommandPropagation(redisClient *c, int flags) {
 }
 
 /* Call() is the core of Redis execution of a command */
+//执行命令
 void call(redisClient *c, int flags) {
     long long dirty, start, duration;
+    //记录命令执行前客户端的flag
     int client_old_flags = c->flags;
 
     /* Sent the command to clients in MONITOR mode, only if the commands are
      * not generated from reading an AOF. */
+    //将命令发送到MONITOR
     if (listLength(server.monitors) &&
         !server.loading &&
         !(c->cmd->flags & (REDIS_CMD_SKIP_MONITOR|REDIS_CMD_ADMIN)))
@@ -2083,21 +2102,28 @@ void call(redisClient *c, int flags) {
     /* Call the command. */
     c->flags &= ~(REDIS_FORCE_AOF|REDIS_FORCE_REPL);
     redisOpArrayInit(&server.also_propagate);
+    //保留旧dirty计数器的值
     dirty = server.dirty;
+    //记录命令开始执行的时间
     start = ustime();
+    //执行命令
     c->cmd->proc(c);
+    //计算耗费的时间
     duration = ustime()-start;
+    //计算命令执行之后的dirty值
     dirty = server.dirty-dirty;
     if (dirty < 0) dirty = 0;
 
     /* When EVAL is called loading the AOF we don't want commands called
      * from Lua to go into the slowlog or to populate statistics. */
+    //不对Lua中发出的命令记录日志和统计信息
     if (server.loading && c->flags & REDIS_LUA_CLIENT)
         flags &= ~(REDIS_CALL_SLOWLOG | REDIS_CALL_STATS);
 
     /* If the caller is Lua, we want to force the EVAL caller to propagate
      * the script if the command flag or client flag are forcing the
      * propagation. */
+    //如果调用者是Lua，那么根据命令flag和客户端flag打开传播标志（propagate）
     if (c->flags & REDIS_LUA_CLIENT && server.lua_caller) {
         if (c->flags & REDIS_FORCE_REPL)
             server.lua_caller->flags |= REDIS_FORCE_REPL;
@@ -2107,18 +2133,21 @@ void call(redisClient *c, int flags) {
 
     /* Log the command into the Slow log if needed, and populate the
      * per-command statistics that we show in INFO commandstats. */
+    //如果有需要，将命令放到SHOWLOG里
     if (flags & REDIS_CALL_SLOWLOG && c->cmd->proc != execCommand) {
         char *latency_event = (c->cmd->flags & REDIS_CMD_FAST) ?
                               "fast-command" : "command";
         latencyAddSampleIfNeeded(latency_event,duration/1000);
         slowlogPushEntryIfNeeded(c->argv,c->argc,duration);
     }
+    //更新命令的统计信息
     if (flags & REDIS_CALL_STATS) {
         c->cmd->microseconds += duration;
         c->cmd->calls++;
     }
 
     /* Propagate the command into the AOF and replication link */
+    //将命令复制到AOF和Slave节点
     if (flags & REDIS_CALL_PROPAGATE) {
         int flags = REDIS_PROPAGATE_NONE;
 
@@ -2132,11 +2161,13 @@ void call(redisClient *c, int flags) {
 
     /* Restore the old FORCE_AOF/REPL flags, since call can be executed
      * recursively. */
+    //将客户端的flag恢复到命令执行之前，因为call可能会递归执行
     c->flags &= ~(REDIS_FORCE_AOF|REDIS_FORCE_REPL);
     c->flags |= client_old_flags & (REDIS_FORCE_AOF|REDIS_FORCE_REPL);
 
     /* Handle the alsoPropagate() API to handle commands that want to propagate
      * multiple separated commands. */
+    //传播额外的命令
     if (server.also_propagate.numops) {
         int j;
         redisOp *rop;
@@ -2147,6 +2178,7 @@ void call(redisClient *c, int flags) {
         }
         redisOpArrayFree(&server.also_propagate);
     }
+    //服务器执行的命令计数加1
     server.stat_numcommands++;
 }
 
@@ -2158,11 +2190,13 @@ void call(redisClient *c, int flags) {
  * If 1 is returned the client is still alive and valid and
  * other operations can be performed by the caller. Otherwise
  * if 0 is returned the client was destroyed (i.e. after QUIT). */
+//处理客户端的命令
 int processCommand(redisClient *c) {
     /* The QUIT command is handled separately. Normal command procs will
      * go through checking for replication and QUIT will cause trouble
      * when FORCE_REPLICATION is enabled and would be implemented in
      * a regular command proc. */
+    //处理quit命令
     if (!strcasecmp(c->argv[0]->ptr,"quit")) {
         addReply(c,shared.ok);
         c->flags |= REDIS_CLOSE_AFTER_REPLY;
@@ -2171,14 +2205,15 @@ int processCommand(redisClient *c) {
 
     /* Now lookup the command and check ASAP about trivial error conditions
      * such as wrong arity, bad command name and so forth. */
+    //查找命令，并进行命令合法性检查，以及命令参数个数检查
     c->cmd = c->lastcmd = lookupCommand(c->argv[0]->ptr);
-    if (!c->cmd) {
+    if (!c->cmd) {  //没有找到指定的命令
         flagTransaction(c);
         addReplyErrorFormat(c,"unknown command '%s'",
             (char*)c->argv[0]->ptr);
         return REDIS_OK;
     } else if ((c->cmd->arity > 0 && c->cmd->arity != c->argc) ||
-               (c->argc < -c->cmd->arity)) {
+               (c->argc < -c->cmd->arity)) {  //参数个数错误
         flagTransaction(c);
         addReplyErrorFormat(c,"wrong number of arguments for '%s' command",
             c->cmd->name);
@@ -2186,6 +2221,7 @@ int processCommand(redisClient *c) {
     }
 
     /* Check if the user is authenticated */
+    //检查认证信息
     if (server.requirepass && !c->authenticated && c->cmd->proc != authCommand)
     {
         flagTransaction(c);
@@ -2197,6 +2233,7 @@ int processCommand(redisClient *c) {
      * However we don't perform the redirection if:
      * 1) The sender of this command is our master.
      * 2) The command has no key arguments. */
+    //如果开启了集群模式，在这里进行转发操作
     if (server.cluster_enabled &&
         !(c->flags & REDIS_MASTER) &&
         !(c->flags & REDIS_LUA_CLIENT &&
@@ -2205,11 +2242,14 @@ int processCommand(redisClient *c) {
     {
         int hashslot;
 
+        //集群已下线
         if (server.cluster->state != REDIS_CLUSTER_OK) {
             flagTransaction(c);
             clusterRedirectClient(c,NULL,0,REDIS_CLUSTER_REDIR_DOWN_STATE);
             return REDIS_OK;
-        } else {
+        }
+        //集群运作正常
+        else {
             int error_code;
             clusterNode *n = getNodeByQuery(c,c->cmd,c->argv,c->argc,&hashslot,&error_code);
             if (n == NULL || n != server.cluster->myself) {
@@ -2225,7 +2265,9 @@ int processCommand(redisClient *c) {
      * First we try to free some memory if possible (if there are volatile
      * keys in the dataset). If there are not the only thing we can do
      * is returning an error. */
+    //如果设置了最大内存，检查内存是否超过限制
     if (server.maxmemory) {
+        //如果内存已超过限制，尝试通过删除过期键来释放内存
         int retval = freeMemoryIfNeeded();
         /* freeMemoryIfNeeded may flush slave output buffers. This may result
          * into a slave, that may be the active client, to be freed. */
@@ -2233,6 +2275,7 @@ int processCommand(redisClient *c) {
 
         /* It was impossible to free enough memory, and the command the client
          * is trying to execute is denied during OOM conditions? Error. */
+        //如果即将执行的命令可能占用大量内存，并且前面内存释放失败的话，那么像客户端返回内存错误
         if ((c->cmd->flags & REDIS_CMD_DENYOOM) && retval == REDIS_ERR) {
             flagTransaction(c);
             addReply(c, shared.oomerr);
@@ -2242,6 +2285,7 @@ int processCommand(redisClient *c) {
 
     /* Don't accept write commands if there are problems persisting on disk
      * and if this is a master instance. */
+    //如果这是一个主服务器，并且这个服务器之前执行BGSAVE时发生了错误，那么不执行命令
     if (((server.stop_writes_on_bgsave_err &&
           server.saveparamslen > 0 &&
           server.lastbgsave_status == REDIS_ERR) ||
@@ -2263,6 +2307,7 @@ int processCommand(redisClient *c) {
 
     /* Don't accept write commands if there are not enough good slaves and
      * user configured the min-slaves-to-write option. */
+    //如果服务器没有足够多的状态良好服务器，并且min-slaves-to-write选项已打开
     if (server.masterhost == NULL &&
         server.repl_min_slaves_to_write &&
         server.repl_min_slaves_max_lag &&
@@ -2276,6 +2321,7 @@ int processCommand(redisClient *c) {
 
     /* Don't accept write commands if this is a read only slave. But
      * accept write commands if this is our master. */
+    //如果这个服务器是一个制度slave的话，那么拒绝执行写命令
     if (server.masterhost && server.repl_slave_ro &&
         !(c->flags & REDIS_MASTER) &&
         c->cmd->flags & REDIS_CMD_WRITE)
@@ -2285,6 +2331,7 @@ int processCommand(redisClient *c) {
     }
 
     /* Only allow SUBSCRIBE and UNSUBSCRIBE in the context of Pub/Sub */
+    //在订阅发布模式的上下文中，只能执行订阅和退订相关的命令
     if (c->flags & REDIS_PUBSUB &&
         c->cmd->proc != pingCommand &&
         c->cmd->proc != subscribeCommand &&
@@ -2308,12 +2355,14 @@ int processCommand(redisClient *c) {
 
     /* Loading DB? Return an error if the command has not the
      * REDIS_CMD_LOADING flag. */
+    //如果服务器正在载入数据到数据库，那么只执行带有REDIS_CMD_LOADING标识的命令
     if (server.loading && !(c->cmd->flags & REDIS_CMD_LOADING)) {
         addReply(c, shared.loadingerr);
         return REDIS_OK;
     }
 
     /* Lua script too slow? Only allow a limited number of commands. */
+    //Lua脚本超时，只允许执行限定的操作
     if (server.lua_timedout &&
           c->cmd->proc != authCommand &&
           c->cmd->proc != replconfCommand &&
@@ -2334,11 +2383,14 @@ int processCommand(redisClient *c) {
         c->cmd->proc != execCommand && c->cmd->proc != discardCommand &&
         c->cmd->proc != multiCommand && c->cmd->proc != watchCommand)
     {
+        //事务上下文中，除EXEC，DISCARD，MULTI和WATCH命令之外，其他所有命令都会被入队到事务队列中
         queueMultiCommand(c);
         addReply(c,shared.queued);
     } else {
+        //执行命令
         call(c,REDIS_CALL_FULL);
         c->woff = server.master_repl_offset;
+        //处理解除了阻塞的键
         if (listLength(server.ready_keys))
             handleClientsBlockedOnLists();
     }
