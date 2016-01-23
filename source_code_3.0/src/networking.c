@@ -157,16 +157,20 @@ redisClient *createClient(int fd) {
  * Typically gets called every time a reply is built, before adding more
  * data to the clients output buffers. If the function returns REDIS_ERR no
  * data should be appended to the output buffers. */
+//为客户端添加io事件，准备发送回复数据
 int prepareClientToWrite(redisClient *c) {
     /* If it's the Lua client we always return ok without installing any
      * handler since there is no socket at all. */
+    //如果时lua脚本的伪客户端，直接返回
     if (c->flags & REDIS_LUA_CLIENT) return REDIS_OK;
 
     /* Masters don't receive replies, unless REDIS_MASTER_FORCE_REPLY flag
      * is set. */
+    //客户端时主服务器且不接受查询，则报错
     if ((c->flags & REDIS_MASTER) &&
         !(c->flags & REDIS_MASTER_FORCE_REPLY)) return REDIS_ERR;
 
+    //无连接的伪客户端不可写
     if (c->fd <= 0) return REDIS_ERR; /* Fake client for AOF loading. */
 
     /* Only install the handler if not already installed and, in case of
@@ -176,6 +180,7 @@ int prepareClientToWrite(redisClient *c) {
          (c->replstate == REDIS_REPL_ONLINE && !c->repl_put_online_on_ack)))
     {
         /* Try to install the write handler. */
+        //添加io事件，准备向客户端发送数据
         if (aeCreateFileEvent(server.el, c->fd, AE_WRITABLE,
                 sendReplyToClient, c) == AE_ERR)
         {
@@ -208,36 +213,46 @@ robj *dupLastObjectIfNeeded(list *reply) {
  * Low level functions to add more data to output buffers.
  * -------------------------------------------------------------------------- */
 
+//将数据写入c->buf中
 int _addReplyToBuffer(redisClient *c, char *s, size_t len) {
     size_t available = sizeof(c->buf)-c->bufpos;
 
+    //检查客户端状态，如果客户端处于关闭态，则不再发送内容
     if (c->flags & REDIS_CLOSE_AFTER_REPLY) return REDIS_OK;
 
     /* If there already are entries in the reply list, we cannot
      * add anything more to the static buffer. */
+    //如果回复链表里有内容，则返回报错
     if (listLength(c->reply) > 0) return REDIS_ERR;
 
     /* Check that the buffer has enough space available for this string. */
+    //确认buf空间足够
     if (len > available) return REDIS_ERR;
 
+    //写入数据
     memcpy(c->buf+c->bufpos,s,len);
     c->bufpos+=len;
     return REDIS_OK;
 }
 
+//将数据写入c->reply回复链表中
 void _addReplyObjectToList(redisClient *c, robj *o) {
     robj *tail;
 
+    //检查客户端状态，如果即将关闭，则不再写入内容
     if (c->flags & REDIS_CLOSE_AFTER_REPLY) return;
 
+    //链表为空，直接将数据写入到链表尾部
     if (listLength(c->reply) == 0) {
         incrRefCount(o);
         listAddNodeTail(c->reply,o);
         c->reply_bytes += getStringObjectSdsUsedMemory(o);
     } else {
+        //取出表尾数据
         tail = listNodeValue(listLast(c->reply));
 
         /* Append to this object when possible. */
+        //检查能否将数据拼接到表尾数据中，如果空间足够，进行拼接
         if (tail->ptr != NULL &&
             tail->encoding == REDIS_ENCODING_RAW &&
             sdslen(tail->ptr)+sdslen(o->ptr) <= REDIS_REPLY_CHUNK_BYTES)
@@ -246,12 +261,15 @@ void _addReplyObjectToList(redisClient *c, robj *o) {
             tail = dupLastObjectIfNeeded(c->reply);
             tail->ptr = sdscatlen(tail->ptr,o->ptr,sdslen(o->ptr));
             c->reply_bytes += zmalloc_size_sds(tail->ptr);
-        } else {
+        }
+        //表尾数据空间不足，新建一个链表节点，写入数据，并插入到表尾
+        else {
             incrRefCount(o);
             listAddNodeTail(c->reply,o);
             c->reply_bytes += getStringObjectSdsUsedMemory(o);
         }
     }
+    //检查回复缓冲区的大小，如果超过系统限制的话，关闭客户端
     asyncCloseClientOnOutputBufferLimitReached(c);
 }
 
@@ -323,8 +341,9 @@ void _addReplyStringToList(redisClient *c, char *s, size_t len) {
  * Higher level functions to queue data on the client output buffer.
  * The following functions are the ones that commands implementations will call.
  * -------------------------------------------------------------------------- */
-
+//写入回复消息
 void addReply(redisClient *c, robj *obj) {
+    //为客户端添加io事件，准备写入回复消息
     if (prepareClientToWrite(c) != REDIS_OK) return;
 
     /* This is an important place where we can avoid copy-on-write
@@ -334,13 +353,19 @@ void addReply(redisClient *c, robj *obj) {
      * If the encoding is RAW and there is room in the static buffer
      * we'll be able to send the object to the client without
      * messing with its page. */
+    //写入字符串类型的回复消息
     if (sdsEncodedObject(obj)) {
+        //尝试将内容复制到c->buf中，这样可以避免内存分配
         if (_addReplyToBuffer(c,obj->ptr,sdslen(obj->ptr)) != REDIS_OK)
+            //如果c->buf空间不够，就复制到c->reply链表中
             _addReplyObjectToList(c,obj);
-    } else if (obj->encoding == REDIS_ENCODING_INT) {
+    }
+    //写入整数类型的回复消息
+    else if (obj->encoding == REDIS_ENCODING_INT) {
         /* Optimization: if there is room in the static buffer for 32 bytes
          * (more than the max chars a 64 bit integer can take as string) we
          * avoid decoding the object and go for the lower level approach. */
+        //如果c->buf中有大于等于32个字节的空间，将整数直接以字符串的形式复制到c->buf中
         if (listLength(c->reply) == 0 && (sizeof(c->buf) - c->bufpos) >= 32) {
             char buf[32];
             int len;
@@ -351,6 +376,7 @@ void addReply(redisClient *c, robj *obj) {
             /* else... continue with the normal code path, but should never
              * happen actually since we verified there is room. */
         }
+        //如果整数长度大于32位，则将其转换为字符串，并写入c->reply链表中
         obj = getDecodedObject(obj);
         if (_addReplyToBuffer(c,obj->ptr,sdslen(obj->ptr)) != REDIS_OK)
             _addReplyObjectToList(c,obj);
@@ -815,6 +841,7 @@ void freeClientsInAsyncFreeQueue(void) {
     }
 }
 
+//向客户端回复消息
 void sendReplyToClient(aeEventLoop *el, int fd, void *privdata, int mask) {
     redisClient *c = privdata;
     int nwritten = 0, totwritten = 0, objlen;
@@ -823,6 +850,7 @@ void sendReplyToClient(aeEventLoop *el, int fd, void *privdata, int mask) {
     REDIS_NOTUSED(el);
     REDIS_NOTUSED(mask);
 
+    //一直循环直到缓冲区为空
     while(c->bufpos > 0 || listLength(c->reply)) {
         if (c->bufpos > 0) {
             nwritten = write(fd,c->buf+c->sentlen,c->bufpos-c->sentlen);
