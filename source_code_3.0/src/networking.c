@@ -572,9 +572,9 @@ void addReplyBulkLen(redisClient *c, robj *obj) {
 
 /* Add a Redis Object as a bulk reply */
 void addReplyBulk(redisClient *c, robj *obj) {
-    addReplyBulkLen(c,obj);
-    addReply(c,obj);
-    addReply(c,shared.crlf);
+    addReplyBulkLen(c,obj);   //写入对象长度
+    addReply(c,obj);          //写入对象
+    addReply(c,shared.crlf);  //写入换行符
 }
 
 /* Add a C buffer as bulk reply */
@@ -852,35 +852,45 @@ void sendReplyToClient(aeEventLoop *el, int fd, void *privdata, int mask) {
 
     //一直循环直到缓冲区为空
     while(c->bufpos > 0 || listLength(c->reply)) {
+        //写入buf中的数据
         if (c->bufpos > 0) {
+            //将buf中的内容写入socket
             nwritten = write(fd,c->buf+c->sentlen,c->bufpos-c->sentlen);
             if (nwritten <= 0) break;
+            //写入成功，更新计数器
             c->sentlen += nwritten;
             totwritten += nwritten;
 
             /* If the buffer was sent, set bufpos to zero to continue with
              * the remainder of the reply. */
+            //如果缓冲区的内容全部写入完毕，清空两个计数器
             if (c->sentlen == c->bufpos) {
                 c->bufpos = 0;
                 c->sentlen = 0;
             }
-        } else {
+        }
+        //写入回复队列中的数据
+        else {
+            //取出队列头结点
             o = listNodeValue(listFirst(c->reply));
             objlen = sdslen(o->ptr);
             objmem = getStringObjectSdsUsedMemory(o);
 
+            //略过空对象
             if (objlen == 0) {
                 listDelNode(c->reply,listFirst(c->reply));
                 c->reply_bytes -= objmem;
                 continue;
             }
 
+            //将内容写入到socket中
             nwritten = write(fd, ((char*)o->ptr)+c->sentlen,objlen-c->sentlen);
             if (nwritten <= 0) break;
             c->sentlen += nwritten;
             totwritten += nwritten;
 
             /* If we fully sent the object on head go to the next one */
+            //如果缓冲队列内容全部写入完毕，清空队列
             if (c->sentlen == objlen) {
                 listDelNode(c->reply,listFirst(c->reply));
                 c->sentlen = 0;
@@ -896,10 +906,13 @@ void sendReplyToClient(aeEventLoop *el, int fd, void *privdata, int mask) {
          * However if we are over the maxmemory limit we ignore that and
          * just deliver as much data as it is possible to deliver. */
         server.stat_net_output_bytes += totwritten;
+        //为避免一个非常大的回复独占服务器，当陷入数据量大于REDIS_MAX_WRITE_PER_EVENT，临时中断写入
+        //将处理时间让给其他客户端，剩下的内容等下次事件就绪再继续写入
         if (totwritten > REDIS_MAX_WRITE_PER_EVENT &&
             (server.maxmemory == 0 ||
              zmalloc_used_memory() < server.maxmemory)) break;
     }
+    //写入出错检查
     if (nwritten == -1) {
         if (errno == EAGAIN) {
             nwritten = 0;
@@ -919,9 +932,11 @@ void sendReplyToClient(aeEventLoop *el, int fd, void *privdata, int mask) {
     }
     if (c->bufpos == 0 && listLength(c->reply) == 0) {
         c->sentlen = 0;
+        //写入完毕，删除io事件
         aeDeleteFileEvent(server.el,c->fd,AE_WRITABLE);
 
         /* Close connection after entire reply has been sent. */
+        //如果指定写入之后关闭客户端flag，则关闭客户端
         if (c->flags & REDIS_CLOSE_AFTER_REPLY) freeClient(c);
     }
 }
