@@ -3783,8 +3783,8 @@ int main(int argc, char **argv) {
         redisLog(REDIS_WARNING,"WARNING: You specified a maxmemory value that is less than 1MB (current value is %llu bytes). Are you sure this is what you really want?", server.maxmemory);
     }
 
-    //运行事件处理器，一直到服务器关闭为止
     aeSetBeforeSleepProc(server.el,beforeSleep);
+    //运行事件处理循环
     aeMain(server.el);
     //服务器关闭，停止事件循环
     aeDeleteEventLoop(server.el);
