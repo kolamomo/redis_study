@@ -1,6 +1,48 @@
 # 请求处理
 
-## initServer
+## 入口
+
+```
+int main(int argc, char **argv) {
+	...
+	
+    //初始化server的相关配置
+    initServerConfig();
+
+    //解析用户启动时指定的配置项
+    if (argc >= 2) {
+        ...
+        //重置保存条件
+        resetServerSaveParams();
+        //载入配置文件
+        loadServerConfig(configfile,options);
+        sdsfree(options);
+    } else {
+        redisLog(REDIS_WARNING, "Warning");
+    }
+    //设置守护进程
+    if (server.daemonize) daemonize();
+    //初始化服务器
+    initServer();
+    //如果服务器是守护进程，创建pid文件
+    if (server.daemonize) createPidFile();
+    //为服务器进程设置名称
+    redisSetProcTitle(argv[0]);
+    redisAsciiArt();
+    checkTcpBacklogSettings();
+
+    if (server.maxmemory > 0 && server.maxmemory < 1024*1024) {
+        redisLog(REDIS_WARNING,"WARNING);
+    }
+
+    aeSetBeforeSleepProc(server.el,beforeSleep);
+    //运行事件处理循环
+    aeMain(server.el);
+    //服务器关闭，停止事件循环
+    aeDeleteEventLoop(server.el);
+    return 0;
+}
+```
 
 ```
 void initServer(void) {
@@ -105,7 +147,7 @@ int listenToPort(int port, int *fds, int *count) {
 static int _anetTcpServer(char *err, int port, char *bindaddr, int af, int backlog)
 {
     int s, rv;
-    char _port[6];  /* strlen("65535") */
+    char _port[6];  
     struct addrinfo hints, *servinfo, *p;
 
     memset(&hints,0,sizeof(hints));
@@ -355,7 +397,6 @@ void processInputBuffer(redisClient *c) {
         //判断客户端状态，如果客户端处于暂停，阻塞，关闭状态，则直接返回
         if (!(c->flags & REDIS_SLAVE) && clientsArePaused()) return;
 
-        /* Immediately abort if the client is in the middle of something. */
         if (c->flags & REDIS_BLOCKED) return;
 
         if (c->flags & REDIS_CLOSE_AFTER_REPLY) return;
@@ -743,4 +784,162 @@ int getGenericCommand(redisClient *c) {
 
 根据请求命令的协议，按照对应的协议写入返回数据。  
 
+```
+//写入文本协议的回复消息
+void addReply(redisClient *c, robj *obj) {
+    //为客户端添加io事件，准备写入回复消息
+    if (prepareClientToWrite(c) != REDIS_OK) return;
 
+    //写入字符串类型的回复消息
+    if (sdsEncodedObject(obj)) {
+        //尝试将内容复制到c->buf中，这样可以避免内存分配
+        if (_addReplyToBuffer(c,obj->ptr,sdslen(obj->ptr)) != REDIS_OK)
+            //如果c->buf空间不够，就复制到c->reply链表中
+            _addReplyObjectToList(c,obj);
+    }
+    //写入整数类型的回复消息
+    else if (obj->encoding == REDIS_ENCODING_INT) {
+        //如果c->buf中有大于等于32个字节的空间，将整数直接以字符串的形式复制到c->buf中
+        if (listLength(c->reply) == 0 && (sizeof(c->buf) - c->bufpos) >= 32) {
+            char buf[32];
+            int len;
+
+            len = ll2string(buf,sizeof(buf),(long)obj->ptr);
+            if (_addReplyToBuffer(c,buf,len) == REDIS_OK)
+                return;
+        }
+        //如果整数长度大于32位，则将其转换为字符串，并写入c->reply链表中
+        obj = getDecodedObject(obj);
+        if (_addReplyToBuffer(c,obj->ptr,sdslen(obj->ptr)) != REDIS_OK)
+            _addReplyObjectToList(c,obj);
+        decrRefCount(obj);
+    } else {
+        redisPanic("Wrong obj->encoding in addReply()");
+    }
+}
+```
+
+```
+//写入bulk协议的回复消息
+void addReplyBulk(redisClient *c, robj *obj) {
+    addReplyBulkLen(c,obj);
+    addReply(c,obj);
+    addReply(c,shared.crlf);
+}
+```
+
+```
+//为客户端添加io事件，准备发送回复数据
+int prepareClientToWrite(redisClient *c) {
+    //如果时lua脚本的伪客户端，直接返回
+    if (c->flags & REDIS_LUA_CLIENT) return REDIS_OK;
+
+    //客户端时主服务器且不接受查询，则报错
+    if ((c->flags & REDIS_MASTER) &&
+        !(c->flags & REDIS_MASTER_FORCE_REPLY)) return REDIS_ERR;
+
+    //无连接的伪客户端不可写
+    if (c->fd <= 0) return REDIS_ERR;
+
+    if (c->bufpos == 0 && listLength(c->reply) == 0 &&
+        (c->replstate == REDIS_REPL_NONE ||
+         (c->replstate == REDIS_REPL_ONLINE && !c->repl_put_online_on_ack)))
+    {
+        //添加io事件，准备向客户端发送数据
+        if (aeCreateFileEvent(server.el, c->fd, AE_WRITABLE,
+                sendReplyToClient, c) == AE_ERR)
+        {
+            freeClientAsync(c);
+            return REDIS_ERR;
+        }
+    }
+
+    return REDIS_OK;
+}
+```
+
+```
+//向客户端回复消息
+void sendReplyToClient(aeEventLoop *el, int fd, void *privdata, int mask) {
+    redisClient *c = privdata;
+    int nwritten = 0, totwritten = 0, objlen;
+    size_t objmem;
+    robj *o;
+    REDIS_NOTUSED(el);
+    REDIS_NOTUSED(mask);
+
+    //一直循环直到缓冲区为空
+    while(c->bufpos > 0 || listLength(c->reply)) {
+        //写入buf中的数据
+        if (c->bufpos > 0) {
+            //将buf中的内容写入socket
+            nwritten = write(fd,c->buf+c->sentlen,c->bufpos-c->sentlen);
+            if (nwritten <= 0) break;
+            //写入成功，更新计数器
+            c->sentlen += nwritten;
+            totwritten += nwritten;
+
+            //如果缓冲区的内容全部写入完毕，清空两个计数器
+            if (c->sentlen == c->bufpos) {
+                c->bufpos = 0;
+                c->sentlen = 0;
+            }
+        } 
+        //写入回复队列中的数据
+        else {
+            //取出队列头结点
+            o = listNodeValue(listFirst(c->reply));
+            objlen = sdslen(o->ptr);
+            objmem = getStringObjectSdsUsedMemory(o);
+
+            //略过空对象
+            if (objlen == 0) {
+                listDelNode(c->reply,listFirst(c->reply));
+                c->reply_bytes -= objmem;
+                continue;
+            }
+
+            //将内容写入到socket中
+            nwritten = write(fd, ((char*)o->ptr)+c->sentlen,objlen-c->sentlen);
+            if (nwritten <= 0) break;
+            c->sentlen += nwritten;
+            totwritten += nwritten;
+
+            //如果缓冲队列内容全部写入完毕，清空队列
+            if (c->sentlen == objlen) {
+                listDelNode(c->reply,listFirst(c->reply));
+                c->sentlen = 0;
+                c->reply_bytes -= objmem;
+            }
+        }
+        server.stat_net_output_bytes += totwritten;
+        //为避免一个非常大的回复独占服务器，当陷入数据量大于REDIS_MAX_WRITE_PER_EVENT，临时中断写入
+        //将处理时间让给其他客户端，剩下的内容等下次事件就绪再继续写入
+        if (totwritten > REDIS_MAX_WRITE_PER_EVENT &&
+            (server.maxmemory == 0 ||
+             zmalloc_used_memory() < server.maxmemory)) break;
+    }
+    //写入出错检查
+    if (nwritten == -1) {
+        if (errno == EAGAIN) {
+            nwritten = 0;
+        } else {
+            redisLog(REDIS_VERBOSE,
+                "Error writing to client: %s", strerror(errno));
+            freeClient(c);
+            return;
+        }
+    }
+    if (totwritten > 0) {
+        if (!(c->flags & REDIS_MASTER)) c->lastinteraction = server.unixtime;
+    }
+    if (c->bufpos == 0 && listLength(c->reply) == 0) {
+        c->sentlen = 0;
+        //写入完毕，删除io事件
+        aeDeleteFileEvent(server.el,c->fd,AE_WRITABLE);
+
+        //如果指定写入之后关闭客户端flag，则关闭客户端
+        if (c->flags & REDIS_CLOSE_AFTER_REPLY) freeClient(c);
+    }
+}
+```
